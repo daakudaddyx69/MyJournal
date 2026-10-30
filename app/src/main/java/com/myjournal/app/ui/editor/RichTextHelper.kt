@@ -2,17 +2,18 @@ package com.myjournal.app.ui.editor
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextDecoration
+import kotlin.math.max
+import kotlin.math.min
 enum class FormatStyle {
     BOLD, ITALIC, UNDERLINE, STRIKETHROUGH, HIGHLIGHT
 }
 object RichTextHelper {
-    val HighlightColor = Color(0x66D49B42)
+    private val HighlightColor = Color(0x66D4A373)
     fun styleFor(type: FormatStyle): SpanStyle = when (type) {
         FormatStyle.BOLD -> SpanStyle(fontWeight = FontWeight.Bold)
         FormatStyle.ITALIC -> SpanStyle(fontStyle = FontStyle.Italic)
@@ -20,23 +21,69 @@ object RichTextHelper {
         FormatStyle.STRIKETHROUGH -> SpanStyle(textDecoration = TextDecoration.LineThrough)
         FormatStyle.HIGHLIGHT -> SpanStyle(background = HighlightColor)
     }
-    /**
-     * Applies formatting to the currently selected range in the TextFieldValue.
-     */
-    fun applyStyleToSelection(value: TextFieldValue, type: FormatStyle): TextFieldValue {
-        val selection = value.selection
-        if (selection.collapsed) return value
-        val start = minOf(selection.start, selection.end)
-        val end = maxOf(selection.start, selection.end)
-        val newAnnotated = buildAnnotatedString {
-            append(value.annotatedString)
-            addStyle(styleFor(type), start, end)
-        }
-        return value.copy(annotatedString = newAnnotated)
+    private fun matchesStyleType(span: SpanStyle, type: FormatStyle): Boolean = when (type) {
+        FormatStyle.BOLD -> span.fontWeight == FontWeight.Bold
+        FormatStyle.ITALIC -> span.fontStyle == FontStyle.Italic
+        FormatStyle.UNDERLINE -> span.textDecoration?.contains(TextDecoration.Underline) == true
+        FormatStyle.STRIKETHROUGH -> span.textDecoration?.contains(TextDecoration.LineThrough) == true
+        FormatStyle.HIGHLIGHT -> span.background != Color.Unspecified
     }
-    /**
-     * Preserves existing spans when typing or deleting characters, and applies active typing styles to newly typed text.
-     */
+    fun getActiveStylesAtSelection(value: TextFieldValue): Set<FormatStyle> {
+        val sel = value.selection
+        val selStart = min(sel.start, sel.end).coerceIn(0, value.text.length)
+        val selEnd = max(sel.start, sel.end).coerceIn(0, value.text.length)
+        val active = mutableSetOf<FormatStyle>()
+        val spans = value.annotatedString.spanStyles
+        if (selStart == selEnd) {
+            if (selStart > 0) {
+                for (span in spans) {
+                    if (span.start <= selStart - 1 && span.end >= selStart) {
+                        for (style in FormatStyle.values()) {
+                            if (matchesStyleType(span.item, style)) active.add(style)
+                        }
+                    }
+                }
+            }
+        } else {
+            for (style in FormatStyle.values()) {
+                val coversAll = (selStart until selEnd).all { idx ->
+                    spans.any { span -> span.start <= idx && span.end > idx && matchesStyleType(span.item, style) }
+                }
+                if (coversAll) active.add(style)
+            }
+        }
+        return active
+    }
+    fun applyStyleToSelection(value: TextFieldValue, style: FormatStyle): TextFieldValue {
+        val sel = value.selection
+        if (sel.collapsed) return value
+        val selStart = min(sel.start, sel.end).coerceIn(0, value.text.length)
+        val selEnd = max(sel.start, sel.end).coerceIn(0, value.text.length)
+        if (selStart >= selEnd) return value
+        val existingSpans = value.annotatedString.spanStyles
+        val alreadyStyled = existingSpans.any {
+            matchesStyleType(it.item, style) && it.start <= selStart && it.end >= selEnd
+        }
+        val updated = buildAnnotatedString {
+            append(value.annotatedString.text)
+            for (s in existingSpans) {
+                if (alreadyStyled && matchesStyleType(s.item, style)) {
+                    if (s.end <= selStart || s.start >= selEnd) {
+                        addStyle(s.item, s.start, s.end)
+                    } else {
+                        if (s.start < selStart) addStyle(s.item, s.start, selStart)
+                        if (s.end > selEnd) addStyle(s.item, selEnd, s.end)
+                    }
+                } else {
+                    addStyle(s.item, s.start, s.end)
+                }
+            }
+            if (!alreadyStyled) {
+                addStyle(styleFor(style), selStart, selEnd)
+            }
+        }
+        return value.copy(annotatedString = updated)
+    }
     fun mergeEditWithSpans(
         oldValue: TextFieldValue,
         newValue: TextFieldValue,
@@ -48,7 +95,7 @@ object RichTextHelper {
             return newValue.copy(annotatedString = oldValue.annotatedString)
         }
         var prefix = 0
-        val minLen = minOf(oldText.length, newText.length)
+        val minLen = min(oldText.length, newText.length)
         while (prefix < minLen && oldText[prefix] == newText[prefix]) {
             prefix++
         }
@@ -59,56 +106,56 @@ object RichTextHelper {
             newSuffix--
         }
         val delta = newText.length - oldText.length
-        val built = buildAnnotatedString {
+        val updated = buildAnnotatedString {
             append(newText)
             for (span in oldValue.annotatedString.spanStyles) {
-                val s = when {
-                    span.start <= prefix -> span.start
-                    span.start >= oldSuffix -> span.start + delta
+                val s = span.start
+                val e = span.end
+                val newStart = when {
+                    s <= prefix -> s
+                    s >= oldSuffix -> (s + delta).coerceAtLeast(prefix)
                     else -> prefix
                 }.coerceIn(0, newText.length)
-                val e = when {
-                    span.end <= prefix -> span.end
-                    span.end >= oldSuffix -> span.end + delta
+                val newEnd = when {
+                    e <= prefix -> e
+                    e >= oldSuffix -> (e + delta).coerceAtLeast(newStart)
                     else -> newSuffix
                 }.coerceIn(0, newText.length)
-                if (s < e) {
-                    addStyle(span.item, s, e)
+                if (newStart < newEnd) {
+                    addStyle(span.item, newStart, newEnd)
                 }
             }
             if (newSuffix > prefix && activeStyles.isNotEmpty()) {
-                for (style in activeStyles) {
-                    addStyle(styleFor(style), prefix, newSuffix)
+                for (st in activeStyles) {
+                    addStyle(styleFor(st), prefix, newSuffix)
                 }
             }
         }
-        return newValue.copy(annotatedString = built)
+        return newValue.copy(annotatedString = updated)
     }
-    /**
-     * Serializes AnnotatedString to lightweight HTML tags for Room storage.
-     */
     fun toHtml(annotated: AnnotatedString): String {
-        if (annotated.text.isEmpty()) return ""
+        val text = annotated.text
+        if (text.isEmpty()) return ""
         val sb = StringBuilder()
-        for (i in annotated.text.indices) {
-            val covering = annotated.spanStyles.filter { it.start <= i && it.end > i }
-            val isBold = covering.any { it.item.fontWeight == FontWeight.Bold }
-            val isItalic = covering.any { it.item.fontStyle == FontStyle.Italic }
-            val isUnderline = covering.any { it.item.textDecoration?.contains(TextDecoration.Underline) == true }
-            val isStrike = covering.any { it.item.textDecoration?.contains(TextDecoration.LineThrough) == true }
-            val isHighlight = covering.any { it.item.background != Color.Unspecified }
+        for (i in text.indices) {
+            val active = annotated.spanStyles.filter { i >= it.start && i < it.end }
+            val isBold = active.any { it.item.fontWeight == FontWeight.Bold }
+            val isItalic = active.any { it.item.fontStyle == FontStyle.Italic }
+            val isUnderline = active.any { it.item.textDecoration?.contains(TextDecoration.Underline) == true }
+            val isStrike = active.any { it.item.textDecoration?.contains(TextDecoration.LineThrough) == true }
+            val isHighlight = active.any { it.item.background != Color.Unspecified }
             if (isBold) sb.append("<b>")
             if (isItalic) sb.append("<i>")
             if (isUnderline) sb.append("<u>")
             if (isStrike) sb.append("<s>")
-            if (isHighlight) sb.append("<mark>")
-            when (val c = annotated.text[i]) {
+            if (isHighlight) sb.append("<hl>")
+            when (val c = text[i]) {
                 '<' -> sb.append("&lt;")
                 '>' -> sb.append("&gt;")
                 '&' -> sb.append("&amp;")
                 else -> sb.append(c)
             }
-            if (isHighlight) sb.append("</mark>")
+            if (isHighlight) sb.append("</hl>")
             if (isStrike) sb.append("</s>")
             if (isUnderline) sb.append("</u>")
             if (isItalic) sb.append("</i>")
@@ -116,49 +163,46 @@ object RichTextHelper {
         }
         return sb.toString()
     }
-    /**
-     * Parses serialized HTML back into an AnnotatedString for the WYSIWYG editor.
-     */
-    fun fromHtml(raw: String): AnnotatedString {
-        if (!raw.contains("<")) return AnnotatedString(raw)
+    fun fromHtml(html: String): AnnotatedString {
+        if (!html.contains("<")) return AnnotatedString(html)
         return buildAnnotatedString {
             var i = 0
             var boldStart = -1
             var italicStart = -1
-            var underlineStart = -1
-            var strikeStart = -1
-            var markStart = -1
-            while (i < raw.length) {
+            var uStart = -1
+            var sStart = -1
+            var hlStart = -1
+            while (i < html.length) {
                 when {
-                    raw.startsWith("<b>", i) -> { boldStart = this.length; i += 3 }
-                    raw.startsWith("</b>", i) -> {
-                        if (boldStart != -1 && boldStart < this.length) addStyle(styleFor(FormatStyle.BOLD), boldStart, this.length)
+                    html.startsWith("<b>", i) -> { boldStart = length; i += 3 }
+                    html.startsWith("</b>", i) -> {
+                        if (boldStart != -1 && boldStart < length) addStyle(styleFor(FormatStyle.BOLD), boldStart, length)
                         boldStart = -1; i += 4
                     }
-                    raw.startsWith("<i>", i) -> { italicStart = this.length; i += 3 }
-                    raw.startsWith("</i>", i) -> {
-                        if (italicStart != -1 && italicStart < this.length) addStyle(styleFor(FormatStyle.ITALIC), italicStart, this.length)
+                    html.startsWith("<i>", i) -> { italicStart = length; i += 3 }
+                    html.startsWith("</i>", i) -> {
+                        if (italicStart != -1 && italicStart < length) addStyle(styleFor(FormatStyle.ITALIC), italicStart, length)
                         italicStart = -1; i += 4
                     }
-                    raw.startsWith("<u>", i) -> { underlineStart = this.length; i += 3 }
-                    raw.startsWith("</u>", i) -> {
-                        if (underlineStart != -1 && underlineStart < this.length) addStyle(styleFor(FormatStyle.UNDERLINE), underlineStart, this.length)
-                        underlineStart = -1; i += 4
+                    html.startsWith("<u>", i) -> { uStart = length; i += 3 }
+                    html.startsWith("</u>", i) -> {
+                        if (uStart != -1 && uStart < length) addStyle(styleFor(FormatStyle.UNDERLINE), uStart, length)
+                        uStart = -1; i += 4
                     }
-                    raw.startsWith("<s>", i) -> { strikeStart = this.length; i += 3 }
-                    raw.startsWith("</s>", i) -> {
-                        if (strikeStart != -1 && strikeStart < this.length) addStyle(styleFor(FormatStyle.STRIKETHROUGH), strikeStart, this.length)
-                        strikeStart = -1; i += 4
+                    html.startsWith("<s>", i) -> { sStart = length; i += 3 }
+                    html.startsWith("</s>", i) -> {
+                        if (sStart != -1 && sStart < length) addStyle(styleFor(FormatStyle.STRIKETHROUGH), sStart, length)
+                        sStart = -1; i += 4
                     }
-                    raw.startsWith("<mark>", i) -> { markStart = this.length; i += 6 }
-                    raw.startsWith("</mark>", i) -> {
-                        if (markStart != -1 && markStart < this.length) addStyle(styleFor(FormatStyle.HIGHLIGHT), markStart, this.length)
-                        markStart = -1; i += 7
+                    html.startsWith("<hl>", i) -> { hlStart = length; i += 4 }
+                    html.startsWith("</hl>", i) -> {
+                        if (hlStart != -1 && hlStart < length) addStyle(styleFor(FormatStyle.HIGHLIGHT), hlStart, length)
+                        hlStart = -1; i += 5
                     }
-                    raw.startsWith("&lt;", i) -> { append('<'); i += 4 }
-                    raw.startsWith("&gt;", i) -> { append('>'); i += 4 }
-                    raw.startsWith("&amp;", i) -> { append('&'); i += 5 }
-                    else -> { append(raw[i]); i++ }
+                    html.startsWith("&lt;", i) -> { append('<'); i += 4 }
+                    html.startsWith("&gt;", i) -> { append('>'); i += 4 }
+                    html.startsWith("&amp;", i) -> { append('&'); i += 5 }
+                    else -> { append(html[i]); i++ }
                 }
             }
         }

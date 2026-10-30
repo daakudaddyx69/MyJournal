@@ -7,8 +7,10 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -24,13 +26,19 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -59,12 +67,29 @@ data class ChecklistItemUi(
     val text: String = "",
     val isChecked: Boolean = false
 )
+sealed class EditorSegment {
+    abstract val id: String
+    class TextSegment(
+        override val id: String = UUID.randomUUID().toString(),
+        initialValue: TextFieldValue = TextFieldValue("")
+    ) : EditorSegment() {
+        var value by mutableStateOf(initialValue)
+    }
+    class ChecklistSegment(
+        override val id: String = UUID.randomUUID().toString(),
+        initialItems: List<ChecklistItemUi> = listOf(ChecklistItemUi())
+    ) : EditorSegment() {
+        val items: SnapshotStateList<ChecklistItemUi> = mutableStateListOf<ChecklistItemUi>().apply {
+            addAll(initialItems)
+        }
+    }
+}
 data class AudioBlockUi(
     val id: String = UUID.randomUUID().toString(),
     val path: String,
     val duration: String
 )
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun EditorScreen(
     entryId: String?,
@@ -82,55 +107,144 @@ fun EditorScreen(
     var isLoaded by remember { mutableStateOf(false) }
     var hasUserEdited by remember { mutableStateOf(false) }
     var saveStatus by remember { mutableStateOf("Ready") }
-    // Entry State
-    var title by remember { mutableStateOf("") }
+    var titleValue by remember { mutableStateOf(TextFieldValue("")) }
+    var titlePendingStyles by remember { mutableStateOf(setOf<FormatStyle>()) }
+    var isTitleFocused by remember { mutableStateOf(false) }
+    // Dynamic interleaved list of Text & Checklist segments!
+    val segments = remember { mutableStateListOf<EditorSegment>(EditorSegment.TextSegment()) }
+    var focusedTextSegmentId by remember { mutableStateOf<String?>(null) }
+    var bodyPendingStyles by remember { mutableStateOf(setOf<FormatStyle>()) }
     var entryDate by remember { mutableStateOf(defaultDate.ifBlank { DateUtils.todayIso() }) }
     var timeLabel by remember { mutableStateOf("Just now") }
     var selectedFolderId by remember { mutableStateOf<String?>("folder_personal") }
     var isPinned by remember { mutableStateOf(false) }
-    var isLocked by remember { mutableStateOf(true) }
+    var isLocked by remember { mutableStateOf(false) }
     var createdAt by remember { mutableLongStateOf(System.currentTimeMillis()) }
-    // Folder & Tag Dialogs
     var showFolderMenu by remember { mutableStateOf(false) }
+    var folderIdRevealingTrash by remember { mutableStateOf<String?>(null) }
     var showNewFolderDialog by remember { mutableStateOf(false) }
     var newFolderName by remember { mutableStateOf("") }
-    val tags = remember { mutableStateListOf("Mindfulness", "Calm") }
+    val tags = remember { mutableStateListOf<String>() }
+    val suggestedMoods = listOf("Mindfulness", "Calm", "Reflective", "Gratitude", "Energy", "Motivated", "Productive")
     var showAddTagDialog by remember { mutableStateOf(false) }
     var newTagText by remember { mutableStateOf("") }
-    // WYSIWYG Rich Text State
-    var richTextValue by remember { mutableStateOf(TextFieldValue("")) }
-    var activeStyles by remember { mutableStateOf(setOf<FormatStyle>()) }
-    // Interactive Checklists, Multiple Photos, Multiple Voice Recordings
-    val checklistItems = remember { mutableStateListOf<ChecklistItemUi>() }
+    val focusRequesters = remember { mutableMapOf<String, FocusRequester>() }
+    var focusTargetId by remember { mutableStateOf<String?>(null) }
     val photoPaths = remember { mutableStateListOf<String>() }
     val audioBlocks = remember { mutableStateListOf<AudioBlockUi>() }
     var isRecordingAudio by remember { mutableStateOf(false) }
     var recordingSeconds by remember { mutableIntStateOf(0) }
     var playingAudioPath by remember { mutableStateOf<String?>(null) }
+    val activeTextSegment = remember(segments.toList(), focusedTextSegmentId) {
+        segments.filterIsInstance<EditorSegment.TextSegment>()
+            .firstOrNull { it.id == focusedTextSegmentId }
+            ?: segments.filterIsInstance<EditorSegment.TextSegment>().lastOrNull()
+    }
+    val currentActiveStyles = remember(
+        titleValue,
+        activeTextSegment?.value,
+        isTitleFocused,
+        titlePendingStyles,
+        bodyPendingStyles
+    ) {
+        if (isTitleFocused) {
+            if (!titleValue.selection.collapsed) {
+                RichTextHelper.getActiveStylesAtSelection(titleValue)
+            } else {
+                titlePendingStyles + RichTextHelper.getActiveStylesAtSelection(titleValue)
+            }
+        } else {
+            val segVal = activeTextSegment?.value ?: TextFieldValue("")
+            if (!segVal.selection.collapsed) {
+                RichTextHelper.getActiveStylesAtSelection(segVal)
+            } else {
+                bodyPendingStyles + RichTextHelper.getActiveStylesAtSelection(segVal)
+            }
+        }
+    }
+    val multiPhotoPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickMultipleVisualMedia()
+    ) { uris: List<Uri> ->
+        if (uris.isNotEmpty()) {
+            uris.forEach { uri ->
+                val saved = mediaHelper.copyImageToInternalStorage(uri)
+                if (saved != null) {
+                    photoPaths.add(saved)
+                }
+            }
+            hasUserEdited = true
+        }
+    }
+    val micPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            val file = mediaHelper.startAudioRecording()
+            if (file != null) {
+                isRecordingAudio = true
+                recordingSeconds = 0
+                hasUserEdited = true
+            }
+        } else {
+            Toast.makeText(context, "Microphone permission is required for voice notes", Toast.LENGTH_SHORT).show()
+        }
+    }
     LaunchedEffect(entryId) {
         if (entryId != null) {
             val existing = viewModel.getEntryById(entryId)
             val blocks = viewModel.getBlocksForEntry(entryId)
             if (existing != null) {
-                title = existing.title
+                val titleBlock = blocks.firstOrNull { it.blockType == "TITLE" }
+                val titleAnnotated = if (titleBlock != null) {
+                    RichTextHelper.fromHtml(titleBlock.textContent)
+                } else {
+                    RichTextHelper.fromHtml(existing.title)
+                }
+                titleValue = TextFieldValue(annotatedString = titleAnnotated)
                 entryDate = existing.entryDate
                 timeLabel = existing.timeLabel
-                selectedFolderId = existing.folderId ?: "folder_personal"
+                selectedFolderId = existing.folderId
                 isPinned = existing.isPinned
                 isLocked = existing.isLocked
                 createdAt = existing.createdAt
                 tags.clear()
                 tags.addAll(existing.tagsCsv.split(",").map { it.trim() }.filter { it.isNotEmpty() })
-                val textBlock = blocks.firstOrNull { it.blockType == "TEXT" }
-                val annotated = if (textBlock != null) {
-                    RichTextHelper.fromHtml(textBlock.textContent)
+                // Reconstruct interleaved Text and Checklist segments in exact sortOrder!
+                segments.clear()
+                var currentChecklistSeg: EditorSegment.ChecklistSegment? = null
+                var currentGroupTag: String? = null
+                val bodyBlocks = blocks.filter { it.blockType == "TEXT" || it.blockType == "CHECKLIST" }
+                if (bodyBlocks.isEmpty()) {
+                    val fallbackAnnotated = RichTextHelper.fromHtml(existing.previewText)
+                    segments.add(EditorSegment.TextSegment(initialValue = TextFieldValue(annotatedString = fallbackAnnotated)))
                 } else {
-                    RichTextHelper.fromHtml(existing.previewText)
+                    bodyBlocks.forEach { b ->
+                        if (b.blockType == "TEXT") {
+                            currentChecklistSeg = null
+                            currentGroupTag = null
+                            val annotated = RichTextHelper.fromHtml(b.textContent)
+                            segments.add(
+                                EditorSegment.TextSegment(
+                                    id = b.id,
+                                    initialValue = TextFieldValue(annotatedString = annotated)
+                                )
+                            )
+                        } else if (b.blockType == "CHECKLIST") {
+                            val groupTag = b.mediaUri ?: "default_group"
+                            val itemUi = ChecklistItemUi(id = b.id, text = b.textContent, isChecked = b.isChecked)
+                            if (currentChecklistSeg != null && currentGroupTag == groupTag) {
+                                currentChecklistSeg!!.items.add(itemUi)
+                            } else {
+                                val newSeg = EditorSegment.ChecklistSegment(initialItems = listOf(itemUi))
+                                segments.add(newSeg)
+                                currentChecklistSeg = newSeg
+                                currentGroupTag = groupTag
+                            }
+                        }
+                    }
                 }
-                richTextValue = TextFieldValue(annotatedString = annotated)
-                checklistItems.clear()
-                blocks.filter { it.blockType == "CHECKLIST" }.forEach { b ->
-                    checklistItems.add(ChecklistItemUi(id = b.id, text = b.textContent, isChecked = b.isChecked))
+                if (segments.none { it is EditorSegment.TextSegment }) {
+                    segments.add(EditorSegment.TextSegment())
                 }
                 photoPaths.clear()
                 blocks.filter { it.blockType == "PHOTO" && !it.mediaUri.isNullOrBlank() }.forEach { b ->
@@ -147,27 +261,129 @@ fun EditorScreen(
                     audioBlocks.add(AudioBlockUi(path = existing.audioUri, duration = existing.audioDuration ?: "00:10"))
                 }
             }
+        } else {
+            selectedFolderId = folders.firstOrNull { !it.isPrivate }?.id
         }
         isLoaded = true
+        if (entryId == null) {
+            if (initialMode == "PHOTO") {
+                multiPhotoPickerLauncher.launch(
+                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                )
+            } else if (initialMode == "VOICE") {
+                val hasPerm = ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.RECORD_AUDIO
+                ) == PackageManager.PERMISSION_GRANTED
+                if (hasPerm) {
+                    val file = mediaHelper.startAudioRecording()
+                    if (file != null) {
+                        isRecordingAudio = true
+                        recordingSeconds = 0
+                        hasUserEdited = true
+                    }
+                } else {
+                    micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                }
+            }
+        }
+    }
+    LaunchedEffect(focusTargetId) {
+        val target = focusTargetId ?: return@LaunchedEffect
+        delay(60L)
+        runCatching { focusRequesters[target]?.requestFocus() }
+        focusTargetId = null
+    }
+    // Insert a brand-new Checklist block right at the current cursor position!
+    fun insertNewChecklistAtCursor() {
+        val targetTextSeg = activeTextSegment
+        if (targetTextSeg == null) {
+            val newItem = ChecklistItemUi()
+            val newCheckSeg = EditorSegment.ChecklistSegment(initialItems = listOf(newItem))
+            segments.add(newCheckSeg)
+            segments.add(EditorSegment.TextSegment())
+            focusTargetId = newItem.id
+            hasUserEdited = true
+            return
+        }
+        val segIdx = segments.indexOf(targetTextSeg)
+        val tfv = targetTextSeg.value
+        val fullAnnotated = tfv.annotatedString
+        val cursor = tfv.selection.start.coerceIn(0, fullAnnotated.length)
+        val beforeAnnotated = fullAnnotated.subSequence(0, cursor)
+        val afterAnnotated = fullAnnotated.subSequence(cursor, fullAnnotated.length)
+        val newItem = ChecklistItemUi()
+        val newChecklist = EditorSegment.ChecklistSegment(initialItems = listOf(newItem))
+        // Trim a single trailing newline on 'before' or leading newline on 'after' so spacing stays clean
+        val cleanBefore = if (beforeAnnotated.text.endsWith("\n")) {
+            beforeAnnotated.subSequence(0, beforeAnnotated.length - 1)
+        } else beforeAnnotated
+        val cleanAfter = if (afterAnnotated.text.startsWith("\n")) {
+            afterAnnotated.subSequence(1, afterAnnotated.length)
+        } else afterAnnotated
+        if (cleanBefore.text.isEmpty() && cleanAfter.text.isEmpty()) {
+            // Current text segment is empty: place the checklist right above it
+            segments.add(segIdx, newChecklist)
+        } else if (cleanBefore.text.isEmpty()) {
+            // Cursor is at the very start of the text block: insert checklist right before this text block
+            segments.add(segIdx, newChecklist)
+        } else {
+            // Cursor is in the middle or after text (e.g., below "I'm krishna"):
+            // Keep 'cleanBefore' above, insert the new Checklist at cursor level, and put 'cleanAfter' below!
+            targetTextSeg.value = TextFieldValue(
+                annotatedString = cleanBefore,
+                selection = TextRange(cleanBefore.length)
+            )
+            segments.add(segIdx + 1, newChecklist)
+            val nextSeg = segments.getOrNull(segIdx + 2)
+            if (cleanAfter.text.isNotEmpty() || nextSeg !is EditorSegment.TextSegment) {
+                segments.add(
+                    segIdx + 2,
+                    EditorSegment.TextSegment(initialValue = TextFieldValue(annotatedString = cleanAfter))
+                )
+            }
+        }
+        focusTargetId = newItem.id
+        hasUserEdited = true
     }
     suspend fun performSaveNow() {
         if (!isLoaded) return
-        val plainText = richTextValue.annotatedString.text.trim()
-        val checklistPreview = checklistItems.joinToString("\n") {
-            (if (it.isChecked) "\u2611 " else "\u2610 ") + it.text
+        val plainTitle = titleValue.annotatedString.text.trim()
+        val previewParts = mutableListOf<String>()
+        var hasAnyChecklist = false
+        segments.forEach { seg ->
+            when (seg) {
+                is EditorSegment.TextSegment -> {
+                    val t = seg.value.annotatedString.text.trim()
+                    if (t.isNotEmpty()) previewParts.add(t)
+                }
+                is EditorSegment.ChecklistSegment -> {
+                    if (seg.items.isNotEmpty()) {
+                        hasAnyChecklist = true
+                        val lines = seg.items.joinToString("\n") {
+                            (if (it.isChecked) "\u2611 " else "\u2610 ") + it.text
+                        }
+                        if (lines.isNotBlank()) previewParts.add(lines)
+                    }
+                }
+            }
         }
-        if (entryId == null && !hasUserEdited && title.isBlank() && plainText.isBlank() && checklistItems.isEmpty() && photoPaths.isEmpty() && audioBlocks.isEmpty()) {
+        val combinedPreview = previewParts.joinToString("\n")
+        if (entryId == null && !hasUserEdited && plainTitle.isBlank() && combinedPreview.isBlank() && !hasAnyChecklist && photoPaths.isEmpty() && audioBlocks.isEmpty()) {
             return
         }
-        val combinedPreview = listOf(plainText, checklistPreview)
-            .filter { it.isNotBlank() }
-            .joinToString("\n")
-        val finalTitle = title.ifBlank {
+        val firstPlainText = segments.filterIsInstance<EditorSegment.TextSegment>()
+            .map { it.value.annotatedString.text.trim() }
+            .firstOrNull { it.isNotEmpty() }
+            .orEmpty()
+        val finalTitleHtml = if (plainTitle.isNotBlank()) {
+            RichTextHelper.toHtml(titleValue.annotatedString)
+        } else {
             when {
-                plainText.isNotBlank() -> plainText.lineSequence().first().take(32)
+                firstPlainText.isNotBlank() -> firstPlainText.lineSequence().first().take(32)
                 audioBlocks.isNotEmpty() -> "Voice Reflection"
                 photoPaths.isNotEmpty() -> "Photo Reflection"
-                checklistItems.isNotEmpty() -> "Checklist Note"
+                hasAnyChecklist -> "Checklist Note"
                 else -> "Untitled Reflection"
             }
         }
@@ -175,7 +391,7 @@ fun EditorScreen(
         val firstAudio = audioBlocks.firstOrNull()
         val entity = EntryEntity(
             id = actualEntryId,
-            title = finalTitle,
+            title = finalTitleHtml,
             previewText = combinedPreview,
             entryDate = entryDate,
             timeLabel = if (entryId == null) viewModel.currentTimeLabel() else timeLabel,
@@ -185,7 +401,7 @@ fun EditorScreen(
             mediaUri = firstPhoto,
             audioUri = firstAudio?.path,
             thumbnailColorHex = if (firstAudio != null) 0xFF4A7C9B else 0xFF3A4D2C,
-            isLocked = isLocked || selectedFolderId == "folder_private",
+            isLocked = isLocked,
             isPinned = isPinned,
             createdAt = createdAt,
             updatedAt = System.currentTimeMillis()
@@ -196,21 +412,39 @@ fun EditorScreen(
             ContentBlockEntity(
                 entryId = actualEntryId,
                 sortOrder = order++,
-                blockType = "TEXT",
-                textContent = RichTextHelper.toHtml(richTextValue.annotatedString)
+                blockType = "TITLE",
+                textContent = finalTitleHtml
             )
         )
-        checklistItems.forEach { item ->
-            blocks.add(
-                ContentBlockEntity(
-                    id = item.id,
-                    entryId = actualEntryId,
-                    sortOrder = order++,
-                    blockType = "CHECKLIST",
-                    textContent = item.text,
-                    isChecked = item.isChecked
-                )
-            )
+        segments.forEach { seg ->
+            when (seg) {
+                is EditorSegment.TextSegment -> {
+                    blocks.add(
+                        ContentBlockEntity(
+                            id = seg.id,
+                            entryId = actualEntryId,
+                            sortOrder = order++,
+                            blockType = "TEXT",
+                            textContent = RichTextHelper.toHtml(seg.value.annotatedString)
+                        )
+                    )
+                }
+                is EditorSegment.ChecklistSegment -> {
+                    seg.items.forEach { item ->
+                        blocks.add(
+                            ContentBlockEntity(
+                                id = item.id,
+                                entryId = actualEntryId,
+                                sortOrder = order++,
+                                blockType = "CHECKLIST",
+                                textContent = item.text,
+                                isChecked = item.isChecked,
+                                mediaUri = seg.id // Preserves separate checklist group identity!
+                            )
+                        )
+                    }
+                }
+            }
         }
         photoPaths.forEach { path ->
             blocks.add(
@@ -237,10 +471,15 @@ fun EditorScreen(
         viewModel.saveEntryWithBlocks(entity, blocks)
         saveStatus = "\u2713 Saved"
     }
+    val segmentsSnapshot = segments.map { seg ->
+        when (seg) {
+            is EditorSegment.TextSegment -> seg.value.annotatedString.toString()
+            is EditorSegment.ChecklistSegment -> seg.items.joinToString { "${it.id}:${it.text}:${it.isChecked}" }
+        }
+    }
     LaunchedEffect(
-        title,
-        richTextValue.annotatedString,
-        checklistItems.toList(),
+        titleValue.annotatedString,
+        segmentsSnapshot,
         photoPaths.toList(),
         audioBlocks.toList(),
         tags.toList(),
@@ -270,55 +509,6 @@ fun EditorScreen(
             mediaHelper.stopPlayback()
         }
     }
-    val photoPickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.PickVisualMedia()
-    ) { uri: Uri? ->
-        if (uri != null) {
-            val saved = mediaHelper.copyImageToInternalStorage(uri)
-            if (saved != null) {
-                photoPaths.add(saved)
-                hasUserEdited = true
-            }
-        }
-    }
-    val micPermissionLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        if (granted) {
-            val file = mediaHelper.startAudioRecording()
-            if (file != null) {
-                isRecordingAudio = true
-                recordingSeconds = 0
-                hasUserEdited = true
-            }
-        } else {
-            Toast.makeText(context, "Microphone permission is required for voice notes", Toast.LENGTH_SHORT).show()
-        }
-    }
-    LaunchedEffect(isLoaded) {
-        if (isLoaded && entryId == null) {
-            if (initialMode == "PHOTO") {
-                photoPickerLauncher.launch(
-                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                )
-            } else if (initialMode == "VOICE") {
-                val hasPerm = ContextCompat.checkSelfPermission(
-                    context,
-                    Manifest.permission.RECORD_AUDIO
-                ) == PackageManager.PERMISSION_GRANTED
-                if (hasPerm) {
-                    val file = mediaHelper.startAudioRecording()
-                    if (file != null) {
-                        isRecordingAudio = true
-                        recordingSeconds = 0
-                        hasUserEdited = true
-                    }
-                } else {
-                    micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                }
-            }
-        }
-    }
     LaunchedEffect(isRecordingAudio) {
         while (isRecordingAudio) {
             delay(1000L)
@@ -346,7 +536,26 @@ fun EditorScreen(
         }
     }
     BackHandler { handleBackNavigation() }
-    val currentFolderName = folders.firstOrNull { it.id == selectedFolderId }?.name ?: "Personal"
+    val currentFolderName = folders.firstOrNull { it.id == selectedFolderId }?.name ?: "No Folder"
+    val isInHiddenVault = selectedFolderId == "folder_private"
+    fun onFormatButtonClicked(style: FormatStyle) {
+        if (isTitleFocused) {
+            if (!titleValue.selection.collapsed) {
+                titleValue = RichTextHelper.applyStyleToSelection(titleValue, style)
+                hasUserEdited = true
+            } else {
+                titlePendingStyles = if (style in titlePendingStyles) titlePendingStyles - style else titlePendingStyles + style
+            }
+        } else {
+            val targetSeg = activeTextSegment ?: return
+            if (!targetSeg.value.selection.collapsed) {
+                targetSeg.value = RichTextHelper.applyStyleToSelection(targetSeg.value, style)
+                hasUserEdited = true
+            } else {
+                bodyPendingStyles = if (style in bodyPendingStyles) bodyPendingStyles - style else bodyPendingStyles + style
+            }
+        }
+    }
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
@@ -384,11 +593,17 @@ fun EditorScreen(
                     }
                     IconButton(onClick = {
                         isLocked = !isLocked
+                        if (isLocked) viewModel.setPrivacyShield(true)
                         hasUserEdited = true
+                        Toast.makeText(
+                            context,
+                            if (isLocked) "Card Locked (\uD83D\uDD12 Locked Reflection)" else "Card Unlocked",
+                            Toast.LENGTH_SHORT
+                        ).show()
                     }) {
                         Icon(
                             imageVector = if (isLocked) Icons.Filled.Lock else Icons.Outlined.LockOpen,
-                            contentDescription = "Lock",
+                            contentDescription = "Toggle Card Lock",
                             tint = if (isLocked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onBackground
                         )
                     }
@@ -427,70 +642,35 @@ fun EditorScreen(
                 ) {
                     FormatToggleBtn(
                         label = "B",
-                        isActive = FormatStyle.BOLD in activeStyles,
+                        isActive = FormatStyle.BOLD in currentActiveStyles,
                         fontWeight = FontWeight.ExtraBold,
-                        onClick = {
-                            if (!richTextValue.selection.collapsed) {
-                                richTextValue = RichTextHelper.applyStyleToSelection(richTextValue, FormatStyle.BOLD)
-                                hasUserEdited = true
-                            } else {
-                                activeStyles = if (FormatStyle.BOLD in activeStyles) activeStyles - FormatStyle.BOLD else activeStyles + FormatStyle.BOLD
-                            }
-                        }
+                        onClick = { onFormatButtonClicked(FormatStyle.BOLD) }
                     )
                     FormatToggleBtn(
                         label = "I",
-                        isActive = FormatStyle.ITALIC in activeStyles,
+                        isActive = FormatStyle.ITALIC in currentActiveStyles,
                         isItalic = true,
-                        onClick = {
-                            if (!richTextValue.selection.collapsed) {
-                                richTextValue = RichTextHelper.applyStyleToSelection(richTextValue, FormatStyle.ITALIC)
-                                hasUserEdited = true
-                            } else {
-                                activeStyles = if (FormatStyle.ITALIC in activeStyles) activeStyles - FormatStyle.ITALIC else activeStyles + FormatStyle.ITALIC
-                            }
-                        }
+                        onClick = { onFormatButtonClicked(FormatStyle.ITALIC) }
                     )
                     FormatToggleBtn(
                         label = "U",
-                        isActive = FormatStyle.UNDERLINE in activeStyles,
+                        isActive = FormatStyle.UNDERLINE in currentActiveStyles,
                         isUnderline = true,
-                        onClick = {
-                            if (!richTextValue.selection.collapsed) {
-                                richTextValue = RichTextHelper.applyStyleToSelection(richTextValue, FormatStyle.UNDERLINE)
-                                hasUserEdited = true
-                            } else {
-                                activeStyles = if (FormatStyle.UNDERLINE in activeStyles) activeStyles - FormatStyle.UNDERLINE else activeStyles + FormatStyle.UNDERLINE
-                            }
-                        }
+                        onClick = { onFormatButtonClicked(FormatStyle.UNDERLINE) }
                     )
                     FormatToggleBtn(
                         label = "S",
-                        isActive = FormatStyle.STRIKETHROUGH in activeStyles,
+                        isActive = FormatStyle.STRIKETHROUGH in currentActiveStyles,
                         isStrike = true,
-                        onClick = {
-                            if (!richTextValue.selection.collapsed) {
-                                richTextValue = RichTextHelper.applyStyleToSelection(richTextValue, FormatStyle.STRIKETHROUGH)
-                                hasUserEdited = true
-                            } else {
-                                activeStyles = if (FormatStyle.STRIKETHROUGH in activeStyles) activeStyles - FormatStyle.STRIKETHROUGH else activeStyles + FormatStyle.STRIKETHROUGH
-                            }
-                        }
+                        onClick = { onFormatButtonClicked(FormatStyle.STRIKETHROUGH) }
                     )
                     IconButton(
-                        onClick = {
-                            if (!richTextValue.selection.collapsed) {
-                                richTextValue = RichTextHelper.applyStyleToSelection(richTextValue, FormatStyle.HIGHLIGHT)
-                                hasUserEdited = true
-                            } else {
-                                activeStyles = if (FormatStyle.HIGHLIGHT in activeStyles) activeStyles - FormatStyle.HIGHLIGHT else activeStyles + FormatStyle.HIGHLIGHT
-                            }
-                        },
+                        onClick = { onFormatButtonClicked(FormatStyle.HIGHLIGHT) },
                         modifier = Modifier
                             .size(38.dp)
                             .clip(CircleShape)
                             .background(
-                                if (FormatStyle.HIGHLIGHT in activeStyles) MaterialTheme.colorScheme.primary
+                                if (FormatStyle.HIGHLIGHT in currentActiveStyles) MaterialTheme.colorScheme.primary
                                 else Color.Transparent
                             )
                     ) {
@@ -498,16 +678,13 @@ fun EditorScreen(
                     }
                     VerticalDivider(modifier = Modifier.height(24.dp).padding(horizontal = 4.dp))
                     AssistChip(
-                        onClick = {
-                            checklistItems.add(ChecklistItemUi())
-                            hasUserEdited = true
-                        },
+                        onClick = { insertNewChecklistAtCursor() },
                         leadingIcon = { Icon(Icons.Default.CheckBox, contentDescription = null, modifier = Modifier.size(16.dp)) },
                         label = { Text("Checklist") }
                     )
                     AssistChip(
                         onClick = {
-                            photoPickerLauncher.launch(
+                            multiPhotoPickerLauncher.launch(
                                 PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
                             )
                         },
@@ -557,22 +734,22 @@ fun EditorScreen(
                 .padding(innerPadding)
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 20.dp, vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+            verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             BasicTextField(
-                value = title,
-                onValueChange = {
-                    title = it
+                value = titleValue,
+                onValueChange = { newValue ->
+                    titleValue = RichTextHelper.mergeEditWithSpans(titleValue, newValue, titlePendingStyles)
                     hasUserEdited = true
                 },
                 textStyle = TextStyle(
                     fontSize = 26.sp,
-                    fontWeight = FontWeight.Bold,
+                    fontWeight = FontWeight.Normal,
                     color = MaterialTheme.colorScheme.onBackground
                 ),
                 cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
                 decorationBox = { innerTextField ->
-                    if (title.isEmpty()) {
+                    if (titleValue.text.isEmpty()) {
                         Text(
                             text = "Title your reflection...",
                             fontSize = 26.sp,
@@ -582,9 +759,10 @@ fun EditorScreen(
                     }
                     innerTextField()
                 },
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .onFocusChanged { isTitleFocused = it.isFocused }
             )
-            // Folder Selector + Tags Row
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -594,10 +772,13 @@ fun EditorScreen(
             ) {
                 Box {
                     AssistChip(
-                        onClick = { showFolderMenu = true },
+                        onClick = {
+                            folderIdRevealingTrash = null
+                            showFolderMenu = true
+                        },
                         leadingIcon = {
                             Icon(
-                                imageVector = if (selectedFolderId == "folder_private") Icons.Default.Lock else Icons.Default.Folder,
+                                imageVector = if (isInHiddenVault) Icons.Default.Lock else Icons.Default.Folder,
                                 contentDescription = "Folder",
                                 tint = MaterialTheme.colorScheme.primary,
                                 modifier = Modifier.size(16.dp)
@@ -608,24 +789,73 @@ fun EditorScreen(
                     )
                     DropdownMenu(
                         expanded = showFolderMenu,
-                        onDismissRequest = { showFolderMenu = false }
+                        onDismissRequest = {
+                            showFolderMenu = false
+                            folderIdRevealingTrash = null
+                        }
                     ) {
                         folders.forEach { folder ->
-                            DropdownMenuItem(
-                                text = { Text(folder.name) },
-                                leadingIcon = {
+                            val isVaultFolder = folder.id == "folder_private"
+                            val showTrashIcon = folderIdRevealingTrash == folder.id && !isVaultFolder
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .combinedClickable(
+                                        onClick = {
+                                            selectedFolderId = folder.id
+                                            hasUserEdited = true
+                                            showFolderMenu = false
+                                            folderIdRevealingTrash = null
+                                            if (isVaultFolder) {
+                                                Toast.makeText(context, "Moved to Hidden Vault \uD83D\uDD12", Toast.LENGTH_SHORT).show()
+                                            }
+                                        },
+                                        onLongClick = {
+                                            if (!isVaultFolder) {
+                                                folderIdRevealingTrash = if (folderIdRevealingTrash == folder.id) null else folder.id
+                                            } else {
+                                                Toast.makeText(context, "Hidden Vault cannot be deleted", Toast.LENGTH_SHORT).show()
+                                            }
+                                        }
+                                    )
+                                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.weight(1f)
+                                ) {
                                     Icon(
                                         imageVector = if (folder.isPrivate) Icons.Default.Lock else Icons.Default.FolderOpen,
-                                        contentDescription = null
+                                        contentDescription = null,
+                                        modifier = Modifier.size(20.dp)
                                     )
-                                },
-                                onClick = {
-                                    selectedFolderId = folder.id
-                                    if (folder.isPrivate) isLocked = true
-                                    hasUserEdited = true
-                                    showFolderMenu = false
+                                    Spacer(modifier = Modifier.width(12.dp))
+                                    Text(text = folder.name, fontSize = 14.sp)
                                 }
-                            )
+                                if (showTrashIcon) {
+                                    IconButton(
+                                        onClick = {
+                                            viewModel.deleteFolder(folder.id)
+                                            if (selectedFolderId == folder.id) {
+                                                selectedFolderId = folders.firstOrNull { it.id != folder.id && !it.isPrivate }?.id
+                                                hasUserEdited = true
+                                            }
+                                            folderIdRevealingTrash = null
+                                            Toast.makeText(context, "Deleted folder \"${folder.name}\"", Toast.LENGTH_SHORT).show()
+                                        },
+                                        modifier = Modifier.size(28.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.DeleteOutline,
+                                            contentDescription = "Delete Folder",
+                                            tint = MaterialTheme.colorScheme.error,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
+                                }
+                            }
                         }
                         HorizontalDivider()
                         DropdownMenuItem(
@@ -633,6 +863,7 @@ fun EditorScreen(
                             leadingIcon = { Icon(Icons.Default.CreateNewFolder, contentDescription = null) },
                             onClick = {
                                 showFolderMenu = false
+                                folderIdRevealingTrash = null
                                 showNewFolderDialog = true
                             }
                         )
@@ -652,13 +883,22 @@ fun EditorScreen(
                         shape = CircleShape
                     )
                 }
+                suggestedMoods.filter { it !in tags }.forEach { mood ->
+                    AssistChip(
+                        onClick = {
+                            tags.add(mood)
+                            hasUserEdited = true
+                        },
+                        label = { Text("+$mood", fontSize = 12.sp) },
+                        shape = CircleShape
+                    )
+                }
                 AssistChip(
                     onClick = { showAddTagDialog = true },
-                    label = { Text("+ Tag", fontSize = 12.sp) },
+                    label = { Text("Custom Tag", fontSize = 12.sp) },
                     shape = CircleShape
                 )
             }
-            // Render All Attached Photo Blocks
             photoPaths.forEachIndexed { index, path ->
                 if (File(path).exists()) {
                     Box(modifier = Modifier.fillMaxWidth()) {
@@ -688,7 +928,6 @@ fun EditorScreen(
                     }
                 }
             }
-            // Active Voice Recording Banner
             if (isRecordingAudio) {
                 Card(
                     shape = RoundedCornerShape(20.dp),
@@ -728,7 +967,6 @@ fun EditorScreen(
                     }
                 }
             }
-            // Render All Saved Audio Blocks
             audioBlocks.forEachIndexed { index, audioItem ->
                 val isPlayingThis = playingAudioPath == audioItem.path
                 Card(
@@ -797,108 +1035,179 @@ fun EditorScreen(
                     }
                 }
             }
-            if (checklistItems.isNotEmpty()) {
-                Card(
-                    shape = RoundedCornerShape(20.dp),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(
-                        modifier = Modifier.padding(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Text(
-                            text = "Checklist",
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = MaterialTheme.colorScheme.secondary,
-                            modifier = Modifier.padding(start = 8.dp)
-                        )
-                        checklistItems.forEachIndexed { index, item ->
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
+            // Render Interleaved Text & Checklist Segments in Exact Order!
+            val isWholeBodyEmpty = segments.size == 1 &&
+                segments.firstOrNull() is EditorSegment.TextSegment &&
+                (segments.first() as EditorSegment.TextSegment).value.text.isEmpty()
+            segments.forEachIndexed { segIndex, segment ->
+                key(segment.id) {
+                    when (segment) {
+                        is EditorSegment.TextSegment -> {
+                            val isLastSegment = segIndex == segments.lastIndex
+                            BasicTextField(
+                                value = segment.value,
+                                onValueChange = { newValue ->
+                                    segment.value = RichTextHelper.mergeEditWithSpans(segment.value, newValue, bodyPendingStyles)
+                                    hasUserEdited = true
+                                },
+                                textStyle = TextStyle(
+                                    fontSize = 17.sp,
+                                    lineHeight = 26.sp,
+                                    color = MaterialTheme.colorScheme.onBackground
+                                ),
+                                cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                                decorationBox = { innerTextField ->
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .defaultMinSize(minHeight = if (isLastSegment) 180.dp else 32.dp)
+                                    ) {
+                                        if (isWholeBodyEmpty && segIndex == 0) {
+                                            Text(
+                                                text = "Start writing your thoughts... Use the toolbar below for Bold, Italic, Highlight, Checklists, Photos, or Voice notes.",
+                                                fontSize = 17.sp,
+                                                lineHeight = 26.sp,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f)
+                                            )
+                                        }
+                                        innerTextField()
+                                    }
+                                },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .onFocusChanged { state ->
+                                        if (state.isFocused) {
+                                            isTitleFocused = false
+                                            focusedTextSegmentId = segment.id
+                                        }
+                                    }
+                            )
+                        }
+                        is EditorSegment.ChecklistSegment -> {
+                            Card(
+                                shape = RoundedCornerShape(20.dp),
+                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
                                 modifier = Modifier.fillMaxWidth()
                             ) {
-                                Checkbox(
-                                    checked = item.isChecked,
-                                    onCheckedChange = { checked ->
-                                        checklistItems[index] = item.copy(isChecked = checked)
-                                        hasUserEdited = true
+                                Column(
+                                    modifier = Modifier.padding(12.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = "Checklist",
+                                            fontSize = 13.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = MaterialTheme.colorScheme.secondary,
+                                            modifier = Modifier.padding(start = 8.dp)
+                                        )
+                                        IconButton(
+                                            onClick = {
+                                                segments.remove(segment)
+                                                if (segments.none { it is EditorSegment.TextSegment }) {
+                                                    segments.add(EditorSegment.TextSegment())
+                                                }
+                                                hasUserEdited = true
+                                            },
+                                            modifier = Modifier.size(24.dp)
+                                        ) {
+                                            Icon(
+                                                Icons.Default.Close,
+                                                contentDescription = "Remove Checklist",
+                                                modifier = Modifier.size(15.dp),
+                                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
                                     }
-                                )
-                                BasicTextField(
-                                    value = item.text,
-                                    onValueChange = { newText ->
-                                        checklistItems[index] = item.copy(text = newText)
-                                        hasUserEdited = true
-                                    },
-                                    textStyle = TextStyle(
-                                        fontSize = 16.sp,
-                                        color = if (item.isChecked) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface,
-                                        textDecoration = if (item.isChecked) TextDecoration.LineThrough else TextDecoration.None
-                                    ),
-                                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
-                                    keyboardActions = KeyboardActions(
-                                        onNext = {
-                                            checklistItems.add(index + 1, ChecklistItemUi())
+                                    segment.items.forEachIndexed { index, item ->
+                                        key(item.id) {
+                                            val requester = remember(item.id) {
+                                                focusRequesters.getOrPut(item.id) { FocusRequester() }
+                                            }
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                modifier = Modifier.fillMaxWidth()
+                                            ) {
+                                                Checkbox(
+                                                    checked = item.isChecked,
+                                                    onCheckedChange = { checked ->
+                                                        segment.items[index] = item.copy(isChecked = checked)
+                                                        hasUserEdited = true
+                                                    }
+                                                )
+                                                BasicTextField(
+                                                    value = item.text,
+                                                    onValueChange = { newText ->
+                                                        if (newText.contains("\n")) {
+                                                            val clean = newText.replace("\n", "")
+                                                            segment.items[index] = item.copy(text = clean)
+                                                            val newItem = ChecklistItemUi()
+                                                            segment.items.add(index + 1, newItem)
+                                                            focusTargetId = newItem.id
+                                                        } else {
+                                                            segment.items[index] = item.copy(text = newText)
+                                                        }
+                                                        hasUserEdited = true
+                                                    },
+                                                    singleLine = true,
+                                                    textStyle = TextStyle(
+                                                        fontSize = 16.sp,
+                                                        color = if (item.isChecked) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface,
+                                                        textDecoration = if (item.isChecked) TextDecoration.LineThrough else TextDecoration.None
+                                                    ),
+                                                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
+                                                    keyboardActions = KeyboardActions(
+                                                        onNext = {
+                                                            val newItem = ChecklistItemUi()
+                                                            segment.items.add(index + 1, newItem)
+                                                            focusTargetId = newItem.id
+                                                            hasUserEdited = true
+                                                        }
+                                                    ),
+                                                    cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                                                    decorationBox = { inner ->
+                                                        if (item.text.isEmpty()) {
+                                                            Text("List item...", color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
+                                                        }
+                                                        inner()
+                                                    },
+                                                    modifier = Modifier
+                                                        .weight(1f)
+                                                        .focusRequester(requester)
+                                                )
+                                                IconButton(onClick = {
+                                                    focusRequesters.remove(item.id)
+                                                    segment.items.removeAt(index)
+                                                    if (segment.items.isEmpty()) {
+                                                        segments.remove(segment)
+                                                    }
+                                                    hasUserEdited = true
+                                                }) {
+                                                    Icon(Icons.Default.Close, contentDescription = "Remove item", modifier = Modifier.size(16.dp))
+                                                }
+                                            }
+                                        }
+                                    }
+                                    TextButton(
+                                        onClick = {
+                                            val newItem = ChecklistItemUi()
+                                            segment.items.add(newItem)
+                                            focusTargetId = newItem.id
                                             hasUserEdited = true
                                         }
-                                    ),
-                                    cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
-                                    decorationBox = { inner ->
-                                        if (item.text.isEmpty()) {
-                                            Text("List item...", color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
-                                        }
-                                        inner()
-                                    },
-                                    modifier = Modifier.weight(1f)
-                                )
-                                IconButton(onClick = {
-                                    checklistItems.removeAt(index)
-                                    hasUserEdited = true
-                                }) {
-                                    Icon(Icons.Default.Close, contentDescription = "Remove item", modifier = Modifier.size(16.dp))
+                                    ) {
+                                        Text("+ Add item")
+                                    }
                                 }
                             }
-                        }
-                        TextButton(
-                            onClick = {
-                                checklistItems.add(ChecklistItemUi())
-                                hasUserEdited = true
-                            }
-                        ) {
-                            Text("+ Add item")
                         }
                     }
                 }
             }
-            BasicTextField(
-                value = richTextValue,
-                onValueChange = { newValue ->
-                    richTextValue = RichTextHelper.mergeEditWithSpans(richTextValue, newValue, activeStyles)
-                    hasUserEdited = true
-                },
-                textStyle = TextStyle(
-                    fontSize = 17.sp,
-                    lineHeight = 26.sp,
-                    color = MaterialTheme.colorScheme.onBackground
-                ),
-                cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
-                decorationBox = { innerTextField ->
-                    Box(modifier = Modifier.fillMaxWidth().defaultMinSize(minHeight = 260.dp)) {
-                        if (richTextValue.text.isEmpty()) {
-                            Text(
-                                text = "Start writing your thoughts... Use the toolbar below for Bold, Italic, Highlight, Checklists, Photos, or Voice notes.",
-                                fontSize = 17.sp,
-                                lineHeight = 26.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f)
-                            )
-                        }
-                        innerTextField()
-                    }
-                },
-                modifier = Modifier.fillMaxWidth()
-            )
         }
     }
     if (showNewFolderDialog) {
@@ -935,7 +1244,7 @@ fun EditorScreen(
     if (showAddTagDialog) {
         AlertDialog(
             onDismissRequest = { showAddTagDialog = false },
-            title = { Text("Add Tag") },
+            title = { Text("Add Custom Tag") },
             text = {
                 OutlinedTextField(
                     value = newTagText,

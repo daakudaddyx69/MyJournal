@@ -28,7 +28,7 @@ data class BackupEntryDto(
     val audioDuration: String? = null,
     val mediaFileName: String? = null,
     val audioFileName: String? = null,
-    val isLocked: Boolean = true,
+    val isLocked: Boolean = false,
     val isPinned: Boolean = false,
     val isArchived: Boolean = false,
     val createdAt: Long = System.currentTimeMillis()
@@ -86,6 +86,9 @@ class JournalRepository @Inject constructor(
             )
         }
     }
+    suspend fun deleteFolder(folderId: String) {
+        dao.deleteFolderTransaction(folderId)
+    }
     suspend fun exportBackupJson(): String {
         val entries = dao.getAllActiveEntriesSnapshot().map {
             BackupEntryDto(
@@ -133,7 +136,6 @@ class JournalRepository @Inject constructor(
     suspend fun importBackupJson(rawJson: String): Int {
         val mediaDir = File(context.filesDir, "media").apply { mkdirs() }
         val trimmed = rawJson.trim()
-        // Support both v2 FullBackupBundleDto and legacy v1 List<BackupEntryDto>
         if (trimmed.startsWith("{")) {
             val bundle = json.decodeFromString<FullBackupBundleDto>(trimmed)
             if (bundle.folders.isNotEmpty()) {
@@ -204,16 +206,24 @@ class JournalRepository @Inject constructor(
     }
     suspend fun togglePin(entry: EntryEntity) = dao.setPinned(entry.id, !entry.isPinned)
     suspend fun toggleLock(entry: EntryEntity) = dao.setLocked(entry.id, !entry.isLocked)
+    suspend fun toggleMoveToVault(entry: EntryEntity) {
+        val currentlyInVault = entry.folderId == "folder_private"
+        val fallbackFolderId = dao.getAllFoldersSnapshot().firstOrNull { !it.isPrivate }?.id
+        val nextFolder = if (currentlyInVault) fallbackFolderId else "folder_private"
+        dao.setVaultStatus(entry.id, entry.isLocked, nextFolder)
+    }
     suspend fun toggleArchive(entry: EntryEntity) = dao.setArchived(entry.id, !entry.isArchived)
     suspend fun unarchive(entryId: String) = dao.setArchived(entryId, false)
     suspend fun moveToTrash(entryId: String) = dao.moveToTrash(entryId)
     suspend fun restoreFromTrash(entryId: String) = dao.restoreFromTrash(entryId)
     suspend fun deletePermanently(entryId: String) = dao.deletePermanently(entryId)
     suspend fun emptyTrash() = dao.emptyTrash()
-    suspend fun seedInitialDataIfNeeded() {
-        dao.upsertFolder(FolderEntity(id = "folder_personal", name = "Personal"))
-        dao.upsertFolder(FolderEntity(id = "folder_mindfulness", name = "Mindfulness"))
+    suspend fun seedInitialDataIfNeeded(shouldSeedDefaultFolders: Boolean) {
         dao.upsertFolder(FolderEntity(id = "folder_private", name = "Hidden Vault", isPrivate = true))
+        if (shouldSeedDefaultFolders) {
+            dao.upsertFolder(FolderEntity(id = "folder_personal", name = "Personal"))
+            dao.upsertFolder(FolderEntity(id = "folder_mindfulness", name = "Mindfulness"))
+        }
         if (dao.getEntryCount() == 0) {
             val today = DateUtils.todayIso()
             val seed1 = EntryEntity(
@@ -226,7 +236,7 @@ class JournalRepository @Inject constructor(
                 folderId = "folder_mindfulness",
                 audioDuration = "00:32",
                 thumbnailColorHex = 0xFF3A4D2C,
-                isLocked = true,
+                isLocked = false,
                 createdAt = System.currentTimeMillis()
             )
             dao.saveEntryWithBlocks(
@@ -250,7 +260,7 @@ class JournalRepository @Inject constructor(
                 folderId = "folder_personal",
                 audioDuration = "00:32",
                 thumbnailColorHex = 0xFF4A7C9B,
-                isLocked = true,
+                isLocked = false,
                 createdAt = System.currentTimeMillis() - 3600_000L
             )
             dao.saveEntryWithBlocks(

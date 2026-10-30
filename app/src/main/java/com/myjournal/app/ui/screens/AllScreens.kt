@@ -8,8 +8,11 @@ import android.os.Build
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -49,6 +52,7 @@ import java.time.YearMonth
 import java.time.ZoneId
 import java.time.format.TextStyle
 import java.util.Locale
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun FeedScreen(
     viewModel: JournalViewModel,
@@ -66,6 +70,7 @@ fun FeedScreen(
     val greeting by viewModel.greetingText.collectAsState()
     var showCreateFolderDialog by remember { mutableStateOf(false) }
     var newFolderName by remember { mutableStateOf("") }
+    var chipRevealingTrash by remember { mutableStateOf<String?>(null) }
     val feedMicPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { isGranted ->
@@ -97,7 +102,6 @@ fun FeedScreen(
         contentPadding = PaddingValues(bottom = 24.dp)
     ) {
         item {
-            // Entire Prompt Card is clickable to open the Editor in WRITE mode
             Card(
                 shape = RoundedCornerShape(24.dp),
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -158,6 +162,7 @@ fun FeedScreen(
                 }
             }
         }
+        // Folder & Filter Chips (Long-pressing a folder chip reveals the red Trash button)
         item {
             LazyRow(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -165,30 +170,71 @@ fun FeedScreen(
             ) {
                 items(filterChips) { chip ->
                     val isSelected = selectedFilter.equals(chip, ignoreCase = true)
-                    val isVault = chip.equals("Hidden Vault", ignoreCase = true) || chip.equals("Locked", ignoreCase = true)
-                    FilterChip(
-                        selected = isSelected,
-                        onClick = {
-                            if (isVault && isPrivacyShield) {
-                                BiometricHelper.authenticate(
-                                    context = context,
-                                    title = "Unlock Hidden Vault"
-                                ) {
-                                    viewModel.setPrivacyShield(false)
-                                    viewModel.selectFilter(chip)
+                    val isVault = chip.equals("Hidden Vault", ignoreCase = true)
+                    val matchingFolder = folders.firstOrNull { it.name.equals(chip, ignoreCase = true) && it.id != "folder_private" }
+                    val showTrash = chipRevealingTrash == chip && matchingFolder != null
+                    Surface(
+                        shape = CircleShape,
+                        color = if (isSelected) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent,
+                        modifier = Modifier
+                            .height(34.dp)
+                            .clip(CircleShape)
+                            .border(
+                                width = 1.dp,
+                                color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
+                                shape = CircleShape
+                            )
+                            .combinedClickable(
+                                onClick = {
+                                    chipRevealingTrash = null
+                                    if (isVault) {
+                                        BiometricHelper.authenticate(
+                                            context = context,
+                                            title = "Unlock Hidden Vault"
+                                        ) {
+                                            viewModel.setPrivacyShield(false)
+                                            viewModel.selectFilter("Hidden Vault")
+                                        }
+                                    } else {
+                                        viewModel.selectFilter(chip)
+                                    }
+                                },
+                                onLongClick = {
+                                    if (matchingFolder != null) {
+                                        chipRevealingTrash = if (chipRevealingTrash == chip) null else chip
+                                    }
                                 }
-                            } else {
-                                viewModel.selectFilter(chip)
+                            )
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(horizontal = 12.dp)
+                        ) {
+                            if (isVault) {
+                                Icon(Icons.Default.Lock, contentDescription = null, modifier = Modifier.size(14.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                            } else if (chip == "Pinned") {
+                                Icon(Icons.Default.PushPin, contentDescription = null, modifier = Modifier.size(14.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
                             }
-                        },
-                        leadingIcon = if (isVault) {
-                            { Icon(Icons.Default.Lock, contentDescription = null, modifier = Modifier.size(15.dp)) }
-                        } else if (chip == "Pinned") {
-                            { Icon(Icons.Default.PushPin, contentDescription = null, modifier = Modifier.size(15.dp)) }
-                        } else null,
-                        label = { Text(chip, fontSize = 13.sp) },
-                        shape = CircleShape
-                    )
+                            Text(text = chip, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface)
+                            if (showTrash) {
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Icon(
+                                    imageVector = Icons.Default.DeleteOutline,
+                                    contentDescription = "Delete Folder",
+                                    tint = MaterialTheme.colorScheme.error,
+                                    modifier = Modifier
+                                        .size(16.dp)
+                                        .clickable {
+                                            viewModel.deleteFolder(matchingFolder!!.id)
+                                            chipRevealingTrash = null
+                                            Toast.makeText(context, "Deleted folder \"${matchingFolder.name}\"", Toast.LENGTH_SHORT).show()
+                                        }
+                                )
+                            }
+                        }
+                    }
                 }
                 item {
                     AssistChip(
@@ -243,7 +289,7 @@ fun FeedScreen(
                     isPlayingAudio = playingEntryId == entry.id,
                     audioProgressStep = audioProgressStep,
                     onCardClick = { clicked: EntryEntity ->
-                        if (isPrivacyShield && (clicked.isLocked || clicked.folderId == "folder_private")) {
+                        if (clicked.isLocked && isPrivacyShield) {
                             BiometricHelper.authenticate(
                                 context = context,
                                 title = "Unlock Reflection"
@@ -273,7 +319,33 @@ fun FeedScreen(
                         }
                     },
                     onTogglePin = viewModel::togglePin,
-                    onToggleLock = viewModel::toggleLock,
+                    onToggleLock = { targetEntry ->
+                            if (!targetEntry.isLocked) {
+                                viewModel.toggleLock(targetEntry)
+                                viewModel.setPrivacyShield(true)
+                                Toast.makeText(context, "Card Locked \uD83D\uDD12", Toast.LENGTH_SHORT).show()
+                            } else if (isPrivacyShield) {
+                                BiometricHelper.authenticate(
+                                    context = context,
+                                    title = "Remove Card Lock"
+                                ) {
+                                    viewModel.toggleLock(targetEntry)
+                                    Toast.makeText(context, "Card Lock Removed \uD83D\uDD13", Toast.LENGTH_SHORT).show()
+                                }
+                            } else {
+                                viewModel.toggleLock(targetEntry)
+                                Toast.makeText(context, "Card Lock Removed \uD83D\uDD13", Toast.LENGTH_SHORT).show()
+                            }
+                        },
+                    onMoveToVault = {
+                        val movingToVault = it.folderId != "folder_private"
+                        viewModel.toggleMoveToVault(it)
+                        Toast.makeText(
+                            context,
+                            if (movingToVault) "Moved to Hidden Vault \uD83D\uDD12" else "Removed from Hidden Vault",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    },
                     onToggleArchive = {
                         viewModel.toggleArchive(it)
                         Toast.makeText(context, "Archived (View in Profile)", Toast.LENGTH_SHORT).show()
@@ -525,7 +597,7 @@ fun CalendarScreen(
                         isPlayingAudio = playingEntryId == entry.id,
                         audioProgressStep = audioProgressStep,
                         onCardClick = { clicked: EntryEntity ->
-                            if (isPrivacyShield && (clicked.isLocked || clicked.folderId == "folder_private")) {
+                            if (clicked.isLocked && isPrivacyShield) {
                                 BiometricHelper.authenticate(context) {
                                     viewModel.setPrivacyShield(false)
                                     onOpenEditor(clicked.id, "WRITE", clicked.entryDate)
@@ -552,7 +624,33 @@ fun CalendarScreen(
                             }
                         },
                         onTogglePin = viewModel::togglePin,
-                        onToggleLock = viewModel::toggleLock,
+                        onToggleLock = { targetEntry ->
+                            if (!targetEntry.isLocked) {
+                                viewModel.toggleLock(targetEntry)
+                                viewModel.setPrivacyShield(true)
+                                Toast.makeText(context, "Card Locked \uD83D\uDD12", Toast.LENGTH_SHORT).show()
+                            } else if (isPrivacyShield) {
+                                BiometricHelper.authenticate(
+                                    context = context,
+                                    title = "Remove Card Lock"
+                                ) {
+                                    viewModel.toggleLock(targetEntry)
+                                    Toast.makeText(context, "Card Lock Removed \uD83D\uDD13", Toast.LENGTH_SHORT).show()
+                                }
+                            } else {
+                                viewModel.toggleLock(targetEntry)
+                                Toast.makeText(context, "Card Lock Removed \uD83D\uDD13", Toast.LENGTH_SHORT).show()
+                            }
+                        },
+                        onMoveToVault = {
+                            val movingToVault = it.folderId != "folder_private"
+                            viewModel.toggleMoveToVault(it)
+                            Toast.makeText(
+                                context,
+                                if (movingToVault) "Moved to Hidden Vault \uD83D\uDD12" else "Removed from Hidden Vault",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        },
                         onToggleArchive = viewModel::toggleArchive,
                         onMoveToTrash = viewModel::moveToTrash
                     )
@@ -800,6 +898,7 @@ fun ProfileScreen(
     val trashedEntries by viewModel.trashedEntries.collectAsState()
     val archivedEntries by viewModel.archivedEntries.collectAsState()
     val allEntries by viewModel.allActiveEntries.collectAsState()
+    val vaultCount by viewModel.vaultEntriesCount.collectAsState()
     val syncStatus by viewModel.syncStatus.collectAsState()
     val storageSize by viewModel.storageSizeFormatted.collectAsState()
     var showEditProfileDialog by remember { mutableStateOf(false) }
@@ -849,7 +948,6 @@ fun ProfileScreen(
             }
         }
     }
-    // Native Android System Google Account Picker (Zero SHA-1 or Cloud Console errors!)
     val systemGoogleAccountPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
     ) { result ->
@@ -1019,15 +1117,15 @@ fun ProfileScreen(
                     }
                     HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
                     SettingRow(
-                        title = "Hidden / Private Folder",
-                        value = "${allEntries.count { it.isLocked || it.folderId == "folder_private" }} Locked >",
+                        title = "Hidden Vault",
+                        value = "$vaultCount Hidden >",
                         onClick = {
                             BiometricHelper.authenticate(
                                 context = context,
-                                title = "Access Private Folder"
+                                title = "Access Hidden Vault"
                             ) {
                                 viewModel.setPrivacyShield(false)
-                                onJumpToFeedWithFilter("Locked")
+                                onJumpToFeedWithFilter("Hidden Vault")
                             }
                         }
                     )
@@ -1071,7 +1169,7 @@ fun ProfileScreen(
                         title = "Manage Storage",
                         value = "$storageSize >",
                         onClick = {
-                            Toast.makeText(context, "Storage: $storageSize (${allEntries.size} active, ${trashedEntries.size} trashed)", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(context, "Storage: $storageSize (${allEntries.size} active, $vaultCount in Vault)", Toast.LENGTH_SHORT).show()
                         }
                     )
                 }

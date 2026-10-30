@@ -246,7 +246,8 @@ fun MyJournalApp(viewModel: JournalViewModel = hiltViewModel()) {
                     }
                 }
             }
-            if (!settings.hasCompletedOnboarding) {
+            // Wait until DataStore finishes loading so the Welcome Dialog never flashes on startup!
+            if (settings.isSettingsLoaded && !settings.hasCompletedOnboarding) {
                 AlertDialog(
                     onDismissRequest = {},
                     title = { Text("Welcome to Your Sanctuary ✨") },

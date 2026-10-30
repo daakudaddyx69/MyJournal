@@ -20,6 +20,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.myjournal.app.data.local.EntryEntity
+import com.myjournal.app.ui.editor.RichTextHelper
 import com.myjournal.app.util.DateUtils
 import java.io.File
 @Composable
@@ -32,6 +33,7 @@ fun ReflectionCard(
     onPlayAudioClick: (EntryEntity) -> Unit,
     onTogglePin: (EntryEntity) -> Unit,
     onToggleLock: (EntryEntity) -> Unit,
+    onMoveToVault: (EntryEntity) -> Unit = {},
     onToggleArchive: (EntryEntity) -> Unit = {},
     onMoveToTrash: (String) -> Unit,
     modifier: Modifier = Modifier
@@ -45,9 +47,14 @@ fun ReflectionCard(
     } else {
         listOf(Color(0xFF3A4D2C), Color(0xFF8C7A4B))
     }
-    val hideContent = isPrivacyMasked && (entry.isLocked || entry.folderId == "folder_private")
+    val isInVault = entry.folderId == "folder_private"
+    // Only mask when BOTH the individual card is marked locked AND the top master Privacy Shield is locked!
+    val hideContent = entry.isLocked && isPrivacyMasked
     val formattedDateHeader = remember(entry.entryDate, entry.timeLabel) {
         DateUtils.formatCardHeader(entry.entryDate, entry.timeLabel)
+    }
+    val styledTitle = remember(entry.title) {
+        RichTextHelper.fromHtml(entry.title)
     }
     Card(
         modifier = modifier
@@ -88,8 +95,8 @@ fun ReflectionCard(
                     ) {
                         Icon(
                             imageVector = if (entry.isLocked) Icons.Default.Lock else Icons.Default.LockOpen,
-                            contentDescription = "Toggle Lock",
-                            tint = if (entry.isLocked) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
+                            contentDescription = "Toggle Card Lock",
+                            tint = if (entry.isLocked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.size(16.dp)
                         )
                     }
@@ -126,11 +133,19 @@ fun ReflectionCard(
                                 }
                             )
                             DropdownMenuItem(
-                                text = { Text(if (entry.isLocked) "Unlock Entry" else "Lock Entry") },
+                                text = { Text(if (entry.isLocked) "Remove Card Lock" else "Lock Card") },
                                 leadingIcon = { Icon(Icons.Default.Lock, contentDescription = null) },
                                 onClick = {
                                     menuExpanded = false
                                     onToggleLock(entry)
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text(if (isInVault) "Remove from Hidden Vault" else "Move to Hidden Vault") },
+                                leadingIcon = { Icon(Icons.Default.FolderSpecial, contentDescription = null) },
+                                onClick = {
+                                    menuExpanded = false
+                                    onMoveToVault(entry)
                                 }
                             )
                             DropdownMenuItem(
@@ -154,13 +169,13 @@ fun ReflectionCard(
                 }
             }
             Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = if (hideContent) "\uD83D\uDD12 Locked Reflection" else entry.title,
-                fontSize = 19.sp,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onSurface
-            )
             if (hideContent) {
+                Text(
+                    text = "\uD83D\uDD12 Locked Reflection",
+                    fontSize = 19.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(
                     text = "Protected by Privacy Shield. Tap to unlock with fingerprint.",
@@ -168,6 +183,12 @@ fun ReflectionCard(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             } else {
+                Text(
+                    text = styledTitle,
+                    fontSize = 19.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
                 Spacer(modifier = Modifier.height(12.dp))
                 Row(modifier = Modifier.fillMaxWidth()) {
                     val hasPhotoFile = !entry.mediaUri.isNullOrBlank() && entry.mediaUri.endsWith(".jpg")

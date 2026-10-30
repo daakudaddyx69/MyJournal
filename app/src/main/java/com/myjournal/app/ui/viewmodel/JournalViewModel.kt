@@ -45,7 +45,7 @@ class JournalViewModel @Inject constructor(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
     val themeMode: StateFlow<AppThemeMode> = userSettings
         .map { it.themeMode }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), AppThemeMode.LIGHT)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), AppThemeMode.DARK)
     val folders: StateFlow<List<FolderEntity>> = repository.folders
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
     private val _playingEntryId = MutableStateFlow<String?>(null)
@@ -57,7 +57,11 @@ class JournalViewModel @Inject constructor(
     val syncStatus: StateFlow<String> = _syncStatus.asStateFlow()
     private var lastBackgroundTimestamp: Long = 0L
     val allActiveEntries: StateFlow<List<EntryEntity>> = repository.activeEntries
+        .map { list -> list.filter { it.folderId != "folder_private" } }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    val vaultEntriesCount: StateFlow<Int> = repository.activeEntries
+        .map { list -> list.count { it.folderId == "folder_private" } }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
     val trashedEntries: StateFlow<List<EntryEntity>> = repository.trashedEntries
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
     val archivedEntries: StateFlow<List<EntryEntity>> = repository.archivedEntries
@@ -72,7 +76,7 @@ class JournalViewModel @Inject constructor(
         }
         "$timeGreeting, $name."
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), "Hello, Rockstar.")
-    val streakCount: StateFlow<Int> = allActiveEntries.map { list ->
+    val streakCount: StateFlow<Int> = repository.activeEntries.map { list ->
         val activeDates = list.mapNotNull {
             runCatching { LocalDate.parse(it.entryDate) }.getOrNull()
         }.toSet()
@@ -90,7 +94,7 @@ class JournalViewModel @Inject constructor(
         }
         streak
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 1)
-    val storageSizeFormatted: StateFlow<String> = allActiveEntries.map {
+    val storageSizeFormatted: StateFlow<String> = repository.activeEntries.map {
         val mediaDir = File(context.filesDir, "media")
         val mediaBytes = if (mediaDir.exists()) mediaDir.walkTopDown().filter { it.isFile }.sumOf { it.length() } else 0L
         val dbFile = context.getDatabasePath("my_journal.db")
@@ -102,39 +106,46 @@ class JournalViewModel @Inject constructor(
         _searchQuery,
         _selectedFilter,
         repository.activeEntries,
-        folders,
-        isPrivacyShieldActive
-    ) { query, filter, list, folderList, shieldActive ->
+        folders
+    ) { query, filter, list, folderList ->
         val folderMap = folderList.associateBy { it.id }
+        val isViewingVault = filter.equals("Hidden Vault", ignoreCase = true)
         list.filter { entry ->
             val folder = entry.folderId?.let { folderMap[it] }
             val folderName = folder?.name.orEmpty()
-            val isPrivateFolder = folder?.isPrivate == true || entry.folderId == "folder_private"
-            if (shieldActive && isPrivateFolder && filter == "All") {
-                return@filter false
-            }
+            val isInHiddenVault = entry.folderId == "folder_private" || folder?.isPrivate == true
             val matchesQuery = query.isBlank() ||
                 entry.title.contains(query, ignoreCase = true) ||
                 entry.previewText.contains(query, ignoreCase = true) ||
                 entry.tagsCsv.contains(query, ignoreCase = true) ||
                 folderName.contains(query, ignoreCase = true)
-            val matchesFilter = when (filter) {
-                "All" -> true
-                "Pinned" -> entry.isPinned
-                "Locked" -> entry.isLocked || isPrivateFolder
-                "Hidden Vault" -> isPrivateFolder
-                else -> {
-                    val matchesTag = entry.tagsCsv.split(",").any { it.trim().equals(filter, ignoreCase = true) }
-                    val matchesFolder = folderName.equals(filter, ignoreCase = true)
-                    matchesTag || matchesFolder
+            if (isViewingVault) {
+                isInHiddenVault && matchesQuery
+            } else {
+                if (isInHiddenVault) {
+                    false
+                } else {
+                    val matchesFilter = when (filter) {
+                        "All" -> true
+                        "Pinned" -> entry.isPinned
+                        else -> {
+                            val matchesTag = entry.tagsCsv.split(",").any { it.trim().equals(filter, ignoreCase = true) }
+                            val matchesFolder = folderName.equals(filter, ignoreCase = true)
+                            matchesTag || matchesFolder
+                        }
+                    }
+                    matchesQuery && matchesFilter
                 }
             }
-            matchesQuery && matchesFilter
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
     init {
         viewModelScope.launch {
-            repository.seedInitialDataIfNeeded()
+            val initialSettings = prefs.settingsFlow.first()
+            repository.seedInitialDataIfNeeded(shouldSeedDefaultFolders = !initialSettings.hasSeededDefaultFolders)
+            if (!initialSettings.hasSeededDefaultFolders) {
+                prefs.markDefaultFoldersSeeded()
+            }
             prefs.settingsFlow.collect { s ->
                 if (s.googleAccountEmail.isNotBlank() && _syncStatus.value.startsWith("Connect")) {
                     _syncStatus.value = "Connected (${s.googleAccountEmail}) >"
@@ -167,6 +178,9 @@ class JournalViewModel @Inject constructor(
     }
     fun onAppBackgrounded() {
         lastBackgroundTimestamp = SystemClock.elapsedRealtime()
+        if (_selectedFilter.value.equals("Hidden Vault", ignoreCase = true)) {
+            _selectedFilter.value = "All"
+        }
         if (userSettings.value.autoLockTimeout == "Immediate") {
             setPrivacyShield(true)
         }
@@ -191,6 +205,12 @@ class JournalViewModel @Inject constructor(
     suspend fun saveEntryWithBlocks(entry: EntryEntity, blocks: List<ContentBlockEntity>) = repository.saveEntryAndBlocks(entry, blocks)
     fun createFolder(name: String, isPrivate: Boolean = false) {
         viewModelScope.launch { repository.createFolder(name, isPrivate) }
+    }
+    fun deleteFolder(folderId: String) {
+        viewModelScope.launch {
+            repository.deleteFolder(folderId)
+            _selectedFilter.value = "All"
+        }
     }
     suspend fun exportBackupJson(): String = repository.exportBackupJson()
     suspend fun importBackupJson(rawJson: String): Int = repository.importBackupJson(rawJson)
@@ -240,6 +260,7 @@ class JournalViewModel @Inject constructor(
     }
     fun togglePin(entry: EntryEntity) = viewModelScope.launch { repository.togglePin(entry) }
     fun toggleLock(entry: EntryEntity) = viewModelScope.launch { repository.toggleLock(entry) }
+    fun toggleMoveToVault(entry: EntryEntity) = viewModelScope.launch { repository.toggleMoveToVault(entry) }
     fun toggleArchive(entry: EntryEntity) = viewModelScope.launch { repository.toggleArchive(entry) }
     fun unarchive(entryId: String) = viewModelScope.launch { repository.unarchive(entryId) }
     fun moveToTrash(entryId: String) = viewModelScope.launch { repository.moveToTrash(entryId) }

@@ -45,6 +45,8 @@ interface JournalDao {
     suspend fun setArchived(id: String, archived: Boolean, timestamp: Long = System.currentTimeMillis())
     @Query("UPDATE entries SET isLocked = :locked, updatedAt = :timestamp WHERE id = :id")
     suspend fun setLocked(id: String, locked: Boolean, timestamp: Long = System.currentTimeMillis())
+    @Query("UPDATE entries SET isLocked = :locked, folderId = :folderId, updatedAt = :timestamp WHERE id = :id")
+    suspend fun setVaultStatus(id: String, locked: Boolean, folderId: String?, timestamp: Long = System.currentTimeMillis())
     @Query("UPDATE entries SET isTrashed = 1, trashedAt = :timestamp WHERE id = :id")
     suspend fun moveToTrash(id: String, timestamp: Long = System.currentTimeMillis())
     @Query("UPDATE entries SET isTrashed = 0, trashedAt = null WHERE id = :id")
@@ -61,4 +63,15 @@ interface JournalDao {
     fun observeFolders(): Flow<List<FolderEntity>>
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertFolder(folder: FolderEntity)
+    @Query("UPDATE entries SET folderId = NULL WHERE folderId = :folderId")
+    suspend fun clearFolderFromEntries(folderId: String)
+    @Query("DELETE FROM folders WHERE id = :folderId")
+    suspend fun deleteFolderById(folderId: String)
+    @Transaction
+    suspend fun deleteFolderTransaction(folderId: String) {
+        if (folderId != "folder_private") {
+            clearFolderFromEntries(folderId)
+            deleteFolderById(folderId)
+        }
+    }
 }

@@ -16,7 +16,8 @@ class MainActivity : FragmentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        // Schedule 30-day Trash Auto-Purge Background Worker
+        // Set window background to dark to eliminate white startup flash
+        window.decorView.setBackgroundColor(0xFF1C1917.toInt())
         val cleanupRequest = PeriodicWorkRequestBuilder<TrashCleanupWorker>(1, TimeUnit.DAYS).build()
         WorkManager.getInstance(applicationContext).enqueueUniquePeriodicWork(
             "trash_30d_cleanup",
