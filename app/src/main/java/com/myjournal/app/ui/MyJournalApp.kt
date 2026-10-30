@@ -41,8 +41,9 @@ fun MyJournalApp(viewModel: JournalViewModel = hiltViewModel()) {
     val isPrivacyShield by viewModel.isPrivacyShieldActive.collectAsState()
     val themeMode by viewModel.themeMode.collectAsState()
     val streak by viewModel.streakCount.collectAsState()
+    val settings by viewModel.userSettings.collectAsState()
     var isSearching by remember { mutableStateOf(false) }
-    // Observe App Background / Foreground transitions for Auto-Lock Timeout
+    var inputName by remember { mutableStateOf("") }
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
@@ -60,188 +61,221 @@ fun MyJournalApp(viewModel: JournalViewModel = hiltViewModel()) {
         AppThemeMode.SYSTEM -> isSystemInDarkTheme()
     }
     MyJournalTheme(darkTheme = useDarkTheme) {
-        Scaffold(
-            containerColor = MaterialTheme.colorScheme.background,
-            topBar = {
-                if (!isInsideEditor) {
-                    TopAppBar(
-                        title = {
-                            if (isSearching) {
-                                OutlinedTextField(
-                                    value = searchQuery,
-                                    onValueChange = viewModel::updateSearchQuery,
-                                    placeholder = { Text("Search reflections, tags, folders...") },
-                                    singleLine = true,
-                                    modifier = Modifier.fillMaxWidth()
-                                )
-                            } else {
-                                Text(
-                                    text = "My Journal",
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 26.sp,
-                                    color = MaterialTheme.colorScheme.onBackground
-                                )
-                            }
-                        },
-                        actions = {
-                            IconButton(onClick = {
-                                isSearching = !isSearching
-                                if (!isSearching) viewModel.updateSearchQuery("")
-                            }) {
-                                Icon(
-                                    imageVector = if (isSearching) Icons.Default.Close else Icons.Outlined.Search,
-                                    contentDescription = "Search",
-                                    tint = MaterialTheme.colorScheme.onBackground
-                                )
-                            }
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier.padding(horizontal = 4.dp)
-                            ) {
-                                Text(
-                                    text = "\uD83D\uDD25 $streak",
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 15.sp,
-                                    color = MaterialTheme.colorScheme.onBackground
-                                )
-                            }
-                            IconButton(onClick = {
-                                if (isPrivacyShield) {
-                                    BiometricHelper.authenticate(context) {
-                                        viewModel.setPrivacyShield(false)
-                                        Toast.makeText(context, "Privacy Shield Unlocked", Toast.LENGTH_SHORT).show()
-                                    }
+        Box(modifier = Modifier.fillMaxSize()) {
+            Scaffold(
+                containerColor = MaterialTheme.colorScheme.background,
+                topBar = {
+                    if (!isInsideEditor) {
+                        TopAppBar(
+                            title = {
+                                if (isSearching) {
+                                    OutlinedTextField(
+                                        value = searchQuery,
+                                        onValueChange = viewModel::updateSearchQuery,
+                                        placeholder = { Text("Search reflections, tags, folders...") },
+                                        singleLine = true,
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
                                 } else {
-                                    viewModel.setPrivacyShield(true)
-                                    Toast.makeText(context, "Privacy Shield Locked", Toast.LENGTH_SHORT).show()
+                                    Text(
+                                        text = "My Journal",
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 26.sp,
+                                        color = MaterialTheme.colorScheme.onBackground
+                                    )
                                 }
-                            }) {
-                                Icon(
-                                    imageVector = if (isPrivacyShield) Icons.Filled.Lock else Icons.Outlined.LockOpen,
-                                    contentDescription = "Toggle Privacy Shield",
-                                    tint = if (isPrivacyShield) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onBackground
+                            },
+                            actions = {
+                                IconButton(onClick = {
+                                    isSearching = !isSearching
+                                    if (!isSearching) viewModel.updateSearchQuery("")
+                                }) {
+                                    Icon(
+                                        imageVector = if (isSearching) Icons.Default.Close else Icons.Outlined.Search,
+                                        contentDescription = "Search",
+                                        tint = MaterialTheme.colorScheme.onBackground
+                                    )
+                                }
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.padding(horizontal = 4.dp)
+                                ) {
+                                    Text(
+                                        text = "\uD83D\uDD25 $streak",
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 15.sp,
+                                        color = MaterialTheme.colorScheme.onBackground
+                                    )
+                                }
+                                IconButton(onClick = {
+                                    if (isPrivacyShield) {
+                                        BiometricHelper.authenticate(context) {
+                                            viewModel.setPrivacyShield(false)
+                                            Toast.makeText(context, "Privacy Shield Unlocked", Toast.LENGTH_SHORT).show()
+                                        }
+                                    } else {
+                                        viewModel.setPrivacyShield(true)
+                                        Toast.makeText(context, "Privacy Shield Locked", Toast.LENGTH_SHORT).show()
+                                    }
+                                }) {
+                                    Icon(
+                                        imageVector = if (isPrivacyShield) Icons.Filled.Lock else Icons.Outlined.LockOpen,
+                                        contentDescription = "Toggle Privacy Shield",
+                                        tint = if (isPrivacyShield) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onBackground
+                                    )
+                                }
+                            },
+                            colors = TopAppBarDefaults.topAppBarColors(
+                                containerColor = MaterialTheme.colorScheme.background
+                            )
+                        )
+                    }
+                },
+                bottomBar = {
+                    if (!isInsideEditor) {
+                        NavigationBar(
+                            containerColor = MaterialTheme.colorScheme.surface,
+                            tonalElevation = 4.dp
+                        ) {
+                            val items = listOf(
+                                Triple(Screen.Feed, "Feed", Icons.Outlined.Article),
+                                Triple(Screen.Calendar, "Calendar", Icons.Outlined.CalendarMonth),
+                                Triple(Screen.Insights, "Insights", Icons.Outlined.TrendingUp),
+                                Triple(Screen.Profile, "Profile", Icons.Outlined.Person)
+                            )
+                            items.forEach { (screen, label, icon) ->
+                                val selected = currentRoute?.contains(screen::class.simpleName.orEmpty()) == true
+                                NavigationBarItem(
+                                    icon = { Icon(icon, contentDescription = label) },
+                                    label = { Text(label) },
+                                    selected = selected,
+                                    onClick = {
+                                        if (!selected) {
+                                            navController.navigate(screen) {
+                                                popUpTo(navController.graph.findStartDestination().id) {
+                                                    saveState = true
+                                                }
+                                                launchSingleTop = true
+                                                restoreState = true
+                                            }
+                                        }
+                                    },
+                                    colors = NavigationBarItemDefaults.colors(
+                                        selectedIconColor = MaterialTheme.colorScheme.primary,
+                                        selectedTextColor = MaterialTheme.colorScheme.primary,
+                                        indicatorColor = MaterialTheme.colorScheme.surfaceVariant
+                                    )
                                 )
                             }
-                        },
-                        colors = TopAppBarDefaults.topAppBarColors(
-                            containerColor = MaterialTheme.colorScheme.background
-                        )
-                    )
-                }
-            },
-            bottomBar = {
-                if (!isInsideEditor) {
-                    NavigationBar(
-                        containerColor = MaterialTheme.colorScheme.surface,
-                        tonalElevation = 4.dp
-                    ) {
-                        val items = listOf(
-                            Triple(Screen.Feed, "Feed", Icons.Outlined.Article),
-                            Triple(Screen.Calendar, "Calendar", Icons.Outlined.CalendarMonth),
-                            Triple(Screen.Insights, "Insights", Icons.Outlined.TrendingUp),
-                            Triple(Screen.Profile, "Profile", Icons.Outlined.Person)
-                        )
-                        items.forEach { (screen, label, icon) ->
-                            val selected = currentRoute?.contains(screen::class.simpleName.orEmpty()) == true
-                            NavigationBarItem(
-                                icon = { Icon(icon, contentDescription = label) },
-                                label = { Text(label) },
-                                selected = selected,
-                                onClick = {
-                                    if (!selected) {
-                                        navController.navigate(screen) {
-                                            popUpTo(navController.graph.findStartDestination().id) {
-                                                saveState = true
-                                            }
-                                            launchSingleTop = true
-                                            restoreState = true
-                                        }
-                                    }
-                                },
-                                colors = NavigationBarItemDefaults.colors(
-                                    selectedIconColor = MaterialTheme.colorScheme.primary,
-                                    selectedTextColor = MaterialTheme.colorScheme.primary,
-                                    indicatorColor = MaterialTheme.colorScheme.surfaceVariant
-                                )
-                            )
                         }
                     }
                 }
+            ) { innerPadding ->
+                NavHost(
+                    navController = navController,
+                    startDestination = Screen.Feed,
+                    modifier = if (isInsideEditor) Modifier.fillMaxSize() else Modifier.padding(innerPadding)
+                ) {
+                    composable<Screen.Feed> {
+                        FeedScreen(
+                            viewModel = viewModel,
+                            onOpenEditor = { entryId, mode, dateStr ->
+                                navController.navigate(
+                                    Screen.Editor(
+                                        entryId = entryId,
+                                        initialMode = mode,
+                                        defaultDate = dateStr
+                                    )
+                                )
+                            }
+                        )
+                    }
+                    composable<Screen.Calendar> {
+                        CalendarScreen(
+                            viewModel = viewModel,
+                            onOpenEditor = { entryId, mode, dateStr ->
+                                navController.navigate(
+                                    Screen.Editor(
+                                        entryId = entryId,
+                                        initialMode = mode,
+                                        defaultDate = dateStr
+                                    )
+                                )
+                            }
+                        )
+                    }
+                    composable<Screen.Insights> {
+                        InsightsScreen(
+                            viewModel = viewModel,
+                            onJumpToFeedWithFilter = { tag ->
+                                viewModel.selectFilter(tag)
+                                navController.navigate(Screen.Feed) {
+                                    popUpTo(navController.graph.findStartDestination().id) {
+                                        saveState = true
+                                    }
+                                    launchSingleTop = true
+                                    restoreState = true
+                                }
+                            }
+                        )
+                    }
+                    composable<Screen.Profile> {
+                        ProfileScreen(
+                            viewModel = viewModel,
+                            onJumpToFeedWithFilter = { filter ->
+                                viewModel.selectFilter(filter)
+                                navController.navigate(Screen.Feed) {
+                                    popUpTo(navController.graph.findStartDestination().id) {
+                                        saveState = true
+                                    }
+                                    launchSingleTop = true
+                                    restoreState = true
+                                }
+                            }
+                        )
+                    }
+                    composable<Screen.Editor> { backStackEntry ->
+                        val route: Screen.Editor = backStackEntry.toRoute()
+                        EditorScreen(
+                            entryId = route.entryId,
+                            initialMode = route.initialMode,
+                            defaultDate = route.defaultDate,
+                            viewModel = viewModel,
+                            onNavigateBack = { navController.popBackStack() }
+                        )
+                    }
+                }
             }
-        ) { innerPadding ->
-            NavHost(
-                navController = navController,
-                startDestination = Screen.Feed,
-                modifier = if (isInsideEditor) Modifier.fillMaxSize() else Modifier.padding(innerPadding)
-            ) {
-                composable<Screen.Feed> {
-                    FeedScreen(
-                        viewModel = viewModel,
-                        onOpenEditor = { entryId, mode, dateStr ->
-                            navController.navigate(
-                                Screen.Editor(
-                                    entryId = entryId,
-                                    initialMode = mode,
-                                    defaultDate = dateStr
-                                )
+            if (!settings.hasCompletedOnboarding) {
+                AlertDialog(
+                    onDismissRequest = {},
+                    title = { Text("Welcome to Your Sanctuary ✨") },
+                    text = {
+                        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Text("A quiet, offline-first space for your thoughts and reflections. What should we call you?")
+                            OutlinedTextField(
+                                value = inputName,
+                                onValueChange = { inputName = it },
+                                label = { Text("Your Name") },
+                                singleLine = true
                             )
                         }
-                    )
-                }
-                composable<Screen.Calendar> {
-                    CalendarScreen(
-                        viewModel = viewModel,
-                        onOpenEditor = { entryId, mode, dateStr ->
-                            navController.navigate(
-                                Screen.Editor(
-                                    entryId = entryId,
-                                    initialMode = mode,
-                                    defaultDate = dateStr
-                                )
-                            )
+                    },
+                    confirmButton = {
+                        Button(onClick = {
+                            viewModel.completeOnboarding(inputName.trim().ifBlank { "Rockstar" })
+                        }) {
+                            Text("Begin Journaling")
                         }
-                    )
-                }
-                composable<Screen.Insights> {
-                    InsightsScreen(
-                        viewModel = viewModel,
-                        onJumpToFeedWithFilter = { tag ->
-                            viewModel.selectFilter(tag)
-                            navController.navigate(Screen.Feed) {
-                                popUpTo(navController.graph.findStartDestination().id) {
-                                    saveState = true
-                                }
-                                launchSingleTop = true
-                                restoreState = true
-                            }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = {
+                            viewModel.completeOnboarding("Rockstar")
+                        }) {
+                            Text("Skip")
                         }
-                    )
-                }
-                composable<Screen.Profile> {
-                    ProfileScreen(
-                        viewModel = viewModel,
-                        onJumpToFeedWithFilter = { filter ->
-                            viewModel.selectFilter(filter)
-                            navController.navigate(Screen.Feed) {
-                                popUpTo(navController.graph.findStartDestination().id) {
-                                    saveState = true
-                                }
-                                launchSingleTop = true
-                                restoreState = true
-                            }
-                        }
-                    )
-                }
-                composable<Screen.Editor> { backStackEntry ->
-                    val route: Screen.Editor = backStackEntry.toRoute()
-                    EditorScreen(
-                        entryId = route.entryId,
-                        initialMode = route.initialMode,
-                        defaultDate = route.defaultDate,
-                        viewModel = viewModel,
-                        onNavigateBack = { navController.popBackStack() }
-                    )
-                }
+                    }
+                )
             }
         }
     }

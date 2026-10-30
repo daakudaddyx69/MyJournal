@@ -1,5 +1,7 @@
 package com.myjournal.app.ui.screens
+import android.accounts.AccountManager
 import android.Manifest
+import android.app.Activity
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
@@ -31,7 +33,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
-import com.google.android.gms.auth.api.signin.GoogleSignIn
 import com.myjournal.app.data.local.EntryEntity
 import com.myjournal.app.ui.components.ReflectionCard
 import com.myjournal.app.ui.viewmodel.JournalViewModel
@@ -62,6 +63,7 @@ fun FeedScreen(
     val isPrivacyShield by viewModel.isPrivacyShieldActive.collectAsState()
     val playingEntryId by viewModel.playingEntryId.collectAsState()
     val audioProgressStep by viewModel.audioProgressStep.collectAsState()
+    val greeting by viewModel.greetingText.collectAsState()
     var showCreateFolderDialog by remember { mutableStateOf(false) }
     var newFolderName by remember { mutableStateOf("") }
     val feedMicPermissionLauncher = rememberLauncherForActivityResult(
@@ -95,18 +97,22 @@ fun FeedScreen(
         contentPadding = PaddingValues(bottom = 24.dp)
     ) {
         item {
+            // Entire Prompt Card is clickable to open the Editor in WRITE mode
             Card(
                 shape = RoundedCornerShape(24.dp),
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
                 elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(24.dp))
+                    .clickable { onOpenEditor(null, "WRITE", todayIso) }
             ) {
                 Column(modifier = Modifier.padding(20.dp)) {
                     Text(
-                        text = "How are you feeling\ntoday?",
-                        fontSize = 22.sp,
+                        text = "$greeting\nHow are you feeling today?",
+                        fontSize = 20.sp,
                         fontWeight = FontWeight.Bold,
-                        lineHeight = 28.sp,
+                        lineHeight = 26.sp,
                         color = MaterialTheme.colorScheme.onSurface
                     )
                     Spacer(modifier = Modifier.height(16.dp))
@@ -152,7 +158,6 @@ fun FeedScreen(
                 }
             }
         }
-        // Interactive Folder & Filter Chips Bar on Feed
         item {
             LazyRow(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -337,7 +342,7 @@ private fun ActionPill(
             Icon(
                 imageVector = icon,
                 contentDescription = label,
-                tint = MaterialTheme.colorScheme.secondary,
+                tint = contentColor,
                 modifier = Modifier.size(16.dp)
             )
             Spacer(modifier = Modifier.width(6.dp))
@@ -584,19 +589,18 @@ fun InsightsScreen(
             .entries
             .sortedByDescending { it.value }
     }
-    // Real Database Calculation for 7x3 Weekly Rhythm (Mon..Sun x Morning/Afternoon/Evening)
     val rhythmStats = remember(entries) {
         val grid = Array(7) { IntArray(3) }
         val dayNames = listOf("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
         val slotNames = listOf("mornings", "afternoons", "evenings")
         entries.forEach { e ->
             val date = runCatching { LocalDate.parse(e.entryDate) }.getOrNull() ?: LocalDate.now()
-            val dayIndex = date.dayOfWeek.value - 1 // 0 = Mon .. 6 = Sun
+            val dayIndex = date.dayOfWeek.value - 1
             val hour = Instant.ofEpochMilli(e.createdAt).atZone(ZoneId.systemDefault()).hour
             val slotIndex = when (hour) {
-                in 5..11 -> 0  // Morning
-                in 12..16 -> 1 // Afternoon
-                else -> 2      // Evening
+                in 5..11 -> 0
+                in 12..16 -> 1
+                else -> 2
             }
             grid[dayIndex][slotIndex]++
         }
@@ -804,7 +808,7 @@ fun ProfileScreen(
     var showTimeoutDialog by remember { mutableStateOf(false) }
     var showBackupDialog by remember { mutableStateOf(false) }
     var showDriveSyncDialog by remember { mutableStateOf(false) }
-    // Full ZIP Export Launcher (Works for both Local Storage AND Google Drive App Document Provider!)
+    var showLoginPromptDialog by remember { mutableStateOf(false) }
     val exportZipLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument("application/zip")
     ) { uri: Uri? ->
@@ -815,15 +819,14 @@ fun ProfileScreen(
                     context.contentResolver.openOutputStream(uri)?.use { out ->
                         BackupZipHelper.writeBackupZip(context, jsonPayload, out)
                     }
-                    viewModel.updateSyncStatusLabel("Saved Backup (${viewModel.currentTimeLabel()})")
-                    Toast.makeText(context, "Full ZIP Backup (Text, Checklists, Photos & Audio) saved!", Toast.LENGTH_LONG).show()
+                    viewModel.updateSyncStatusLabel("Saved to Drive (${viewModel.currentTimeLabel()}) >")
+                    Toast.makeText(context, "Full ZIP Backup saved to Drive successfully!", Toast.LENGTH_LONG).show()
                 } catch (e: Exception) {
                     Toast.makeText(context, "Backup failed: ${e.message}", Toast.LENGTH_SHORT).show()
                 }
             }
         }
     }
-    // Full ZIP / JSON Restore Launcher (Works from Local Storage OR Google Drive)
     val importZipLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri: Uri? ->
@@ -835,8 +838,8 @@ fun ProfileScreen(
                     }
                     if (!extractedJson.isNullOrBlank()) {
                         val count = viewModel.importBackupJson(extractedJson)
-                        viewModel.updateSyncStatusLabel("Restored $count entries")
-                        Toast.makeText(context, "Restored $count reflections (with blocks & media)!", Toast.LENGTH_LONG).show()
+                        viewModel.updateSyncStatusLabel("Restored $count entries >")
+                        Toast.makeText(context, "Restored $count reflections successfully!", Toast.LENGTH_LONG).show()
                     } else {
                         Toast.makeText(context, "No valid backup data found in file", Toast.LENGTH_SHORT).show()
                     }
@@ -846,30 +849,30 @@ fun ProfileScreen(
             }
         }
     }
-    val googleDriveSignInLauncher = rememberLauncherForActivityResult(
+    // Native Android System Google Account Picker (Zero SHA-1 or Cloud Console errors!)
+    val systemGoogleAccountPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
     ) { result ->
-        val task = GoogleSignIn.getSignedInAccountFromIntent(result.data)
-        if (task.isSuccessful) {
-            val account = task.result
-            if (account != null) {
-                viewModel.saveProfile(
-                    account.displayName ?: settings.userName,
-                    account.email ?: settings.userEmail
-                )
-                viewModel.backupToGoogleDriveNow { msg ->
-                    Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
-                }
+        if (result.resultCode == Activity.RESULT_OK && result.data != null) {
+            val selectedEmail = result.data?.getStringExtra(AccountManager.KEY_ACCOUNT_NAME).orEmpty()
+            if (selectedEmail.isNotBlank()) {
+                viewModel.connectGoogleEmail(selectedEmail)
+                Toast.makeText(context, "Signed in as $selectedEmail", Toast.LENGTH_SHORT).show()
+                showDriveSyncDialog = true
             }
-        } else {
-            // Automatic fallback: Open Android's Google Drive file saver directly if OAuth SHA-1 isn't registered
-            Toast.makeText(
-                context,
-                "Opening Google Drive Picker directly...",
-                Toast.LENGTH_SHORT
-            ).show()
-            exportZipLauncher.launch("my_journal_drive_backup_${DateUtils.todayIso()}.zip")
         }
+    }
+    fun launchSystemGoogleAccountPicker() {
+        val intent = AccountManager.newChooseAccountIntent(
+            null,
+            null,
+            arrayOf("com.google"),
+            null,
+            null,
+            null,
+            null
+        )
+        systemGoogleAccountPickerLauncher.launch(intent)
     }
     val notifPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
@@ -919,7 +922,7 @@ fun ProfileScreen(
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            text = settings.userName.take(2).uppercase(),
+                            text = settings.userName.take(2).uppercase().ifBlank { "RO" },
                             fontSize = 22.sp,
                             fontWeight = FontWeight.Bold,
                             color = Color.White
@@ -927,11 +930,11 @@ fun ProfileScreen(
                     }
                     Spacer(modifier = Modifier.width(14.dp))
                     Column(modifier = Modifier.weight(1f)) {
-                        Text(text = settings.userName, fontSize = 19.sp, fontWeight = FontWeight.Bold)
+                        Text(text = settings.userName.ifBlank { "Rockstar" }, fontSize = 19.sp, fontWeight = FontWeight.Bold)
                         Text(
-                            text = settings.userEmail,
+                            text = if (settings.googleAccountEmail.isNotBlank()) "\u2714 ${settings.googleAccountEmail}" else "Local Journal \u00B7 Not signed into Cloud",
                             fontSize = 13.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = if (settings.googleAccountEmail.isNotBlank()) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
                         )
                         Spacer(modifier = Modifier.height(8.dp))
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -943,32 +946,43 @@ fun ProfileScreen(
                                     .clickable { showEditProfileDialog = true }
                             ) {
                                 Text(
-                                    text = "Edit Profile",
+                                    text = "Edit Name",
                                     color = MaterialTheme.colorScheme.surface,
                                     fontSize = 12.sp,
                                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
                                 )
                             }
-                            Surface(
-                                shape = CircleShape,
-                                color = MaterialTheme.colorScheme.surfaceVariant,
-                                modifier = Modifier
-                                    .clip(CircleShape)
-                                    .clickable {
-                                        if (settings.isPrivacyShieldActive) {
-                                            BiometricHelper.authenticate(context) {
-                                                viewModel.setPrivacyShield(false)
-                                            }
-                                        } else {
-                                            viewModel.setPrivacyShield(true)
-                                        }
-                                    }
-                            ) {
-                                Text(
-                                    text = if (settings.isPrivacyShieldActive) "Shield: ON" else "Shield: OFF",
-                                    fontSize = 12.sp,
-                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
-                                )
+                            if (settings.googleAccountEmail.isBlank()) {
+                                Surface(
+                                    shape = CircleShape,
+                                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.25f),
+                                    modifier = Modifier
+                                        .clip(CircleShape)
+                                        .clickable { launchSystemGoogleAccountPicker() }
+                                ) {
+                                    Text(
+                                        text = "Connect Google",
+                                        color = MaterialTheme.colorScheme.primary,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                                    )
+                                }
+                            } else {
+                                Surface(
+                                    shape = CircleShape,
+                                    color = MaterialTheme.colorScheme.errorContainer,
+                                    modifier = Modifier
+                                        .clip(CircleShape)
+                                        .clickable { viewModel.signOutFromCloud() }
+                                ) {
+                                    Text(
+                                        text = "Sign Out",
+                                        color = MaterialTheme.colorScheme.onErrorContainer,
+                                        fontSize = 12.sp,
+                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                                    )
+                                }
                             }
                         }
                     }
@@ -1038,7 +1052,13 @@ fun ProfileScreen(
                     SettingRow(
                         title = "Google Drive Sync",
                         value = syncStatus,
-                        onClick = { showDriveSyncDialog = true }
+                        onClick = {
+                            if (settings.googleAccountEmail.isBlank()) {
+                                showLoginPromptDialog = true
+                            } else {
+                                showDriveSyncDialog = true
+                            }
+                        }
                     )
                     HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
                     SettingRow(
@@ -1118,24 +1138,46 @@ fun ProfileScreen(
             }
         }
     }
+    if (showLoginPromptDialog) {
+        AlertDialog(
+            onDismissRequest = { showLoginPromptDialog = false },
+            title = { Text("Google Cloud Login Required") },
+            text = {
+                Text("To save and sync your reflections on the cloud, please sign in with your Google account first.")
+            },
+            confirmButton = {
+                Button(onClick = {
+                    showLoginPromptDialog = false
+                    launchSystemGoogleAccountPicker()
+                }) {
+                    Text("Sign in with Google")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showLoginPromptDialog = false }) { Text("Cancel") }
+            }
+        )
+    }
     if (showDriveSyncDialog) {
-        val isSignedIn = viewModel.isSignedInToDrive()
         AlertDialog(
             onDismissRequest = { showDriveSyncDialog = false },
-            title = { Text("Google Drive Backup & Restore") },
+            title = { Text("Google Drive Cloud Sync") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("Signed in as:\n${settings.googleAccountEmail}", fontWeight = FontWeight.Medium)
                     Text(
-                        "Save or restore a complete .zip bundle (including all reflections, checklists, photos, and voice notes) directly to your Google Drive."
+                        "Select Google Drive in the system sheet to save or restore your complete .zip backup (including photos & voice recordings).",
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    OutlinedButton(
+                    Button(
                         onClick = {
                             showDriveSyncDialog = false
-                            exportZipLauncher.launch("my_journal_drive_backup_${DateUtils.todayIso()}.zip")
+                            exportZipLauncher.launch("my_journal_cloud_${DateUtils.todayIso()}.zip")
                         },
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Text("\u2601\uFE0F Save Full ZIP to Google Drive")
+                        Text("\u2601\uFE0F Save Full Backup to Google Drive")
                     }
                     OutlinedButton(
                         onClick = {
@@ -1144,23 +1186,7 @@ fun ProfileScreen(
                         },
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Text("\uD83D\uDCE5 Restore ZIP from Google Drive")
-                    }
-                    HorizontalDivider()
-                    TextButton(
-                        onClick = {
-                            showDriveSyncDialog = false
-                            if (isSignedIn) {
-                                viewModel.backupToGoogleDriveNow { msg ->
-                                    Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
-                                }
-                            } else {
-                                googleDriveSignInLauncher.launch(viewModel.getDriveSignInIntent())
-                            }
-                        },
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text(if (isSignedIn) "Sync via OAuth AppFolder" else "Connect Google OAuth (Cloud Console)")
+                        Text("\uD83D\uDCE5 Restore Backup from Google Drive")
                     }
                 }
             },
@@ -1196,29 +1222,20 @@ fun ProfileScreen(
     }
     if (showEditProfileDialog) {
         var tempName by remember(settings.userName) { mutableStateOf(settings.userName) }
-        var tempEmail by remember(settings.userEmail) { mutableStateOf(settings.userEmail) }
         AlertDialog(
             onDismissRequest = { showEditProfileDialog = false },
-            title = { Text("Edit Profile") },
+            title = { Text("Edit Name") },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    OutlinedTextField(
-                        value = tempName,
-                        onValueChange = { tempName = it },
-                        label = { Text("Name") },
-                        singleLine = true
-                    )
-                    OutlinedTextField(
-                        value = tempEmail,
-                        onValueChange = { tempEmail = it },
-                        label = { Text("Email") },
-                        singleLine = true
-                    )
-                }
+                OutlinedTextField(
+                    value = tempName,
+                    onValueChange = { tempName = it },
+                    label = { Text("Your Name") },
+                    singleLine = true
+                )
             },
             confirmButton = {
                 Button(onClick = {
-                    viewModel.saveProfile(tempName, tempEmail)
+                    viewModel.saveProfile(tempName.trim().ifBlank { "Rockstar" }, settings.googleAccountEmail)
                     showEditProfileDialog = false
                 }) { Text("Save") }
             }

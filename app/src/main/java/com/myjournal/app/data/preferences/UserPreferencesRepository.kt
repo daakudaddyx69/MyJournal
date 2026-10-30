@@ -10,8 +10,9 @@ import javax.inject.Inject
 import javax.inject.Singleton
 private val Context.dataStore by preferencesDataStore(name = "user_settings")
 data class UserSettings(
-    val userName: String = "Alex Carter",
-    val userEmail: String = "alex.carter@gmail.com",
+    val hasCompletedOnboarding: Boolean = false,
+    val userName: String = "",
+    val googleAccountEmail: String = "",
     val themeMode: AppThemeMode = AppThemeMode.LIGHT,
     val isPrivacyShieldActive: Boolean = false,
     val autoLockTimeout: String = "Immediate",
@@ -22,8 +23,9 @@ class UserPreferencesRepository @Inject constructor(
     @ApplicationContext private val context: Context
 ) {
     private object Keys {
+        val HAS_COMPLETED_ONBOARDING = booleanPreferencesKey("has_completed_onboarding")
         val USER_NAME = stringPreferencesKey("user_name")
-        val USER_EMAIL = stringPreferencesKey("user_email")
+        val GOOGLE_ACCOUNT_EMAIL = stringPreferencesKey("google_account_email")
         val THEME_MODE = stringPreferencesKey("theme_mode")
         val PRIVACY_SHIELD = booleanPreferencesKey("privacy_shield")
         val AUTO_LOCK_TIMEOUT = stringPreferencesKey("auto_lock_timeout")
@@ -33,19 +35,30 @@ class UserPreferencesRepository @Inject constructor(
         val themeStr = prefs[Keys.THEME_MODE] ?: AppThemeMode.LIGHT.name
         val theme = runCatching { AppThemeMode.valueOf(themeStr) }.getOrDefault(AppThemeMode.LIGHT)
         UserSettings(
-            userName = prefs[Keys.USER_NAME] ?: "Alex Carter",
-            userEmail = prefs[Keys.USER_EMAIL] ?: "alex.carter@gmail.com",
+            hasCompletedOnboarding = prefs[Keys.HAS_COMPLETED_ONBOARDING] ?: false,
+            userName = (prefs[Keys.USER_NAME] ?: "").trim(),
+            googleAccountEmail = (prefs[Keys.GOOGLE_ACCOUNT_EMAIL] ?: "").trim(),
             themeMode = theme,
             isPrivacyShieldActive = prefs[Keys.PRIVACY_SHIELD] ?: false,
             autoLockTimeout = prefs[Keys.AUTO_LOCK_TIMEOUT] ?: "Immediate",
             dailyReminder = prefs[Keys.DAILY_REMINDER] ?: true
         )
     }
+    suspend fun setOnboardingCompleted(name: String) {
+        val cleanName = name.trim().ifBlank { "Rockstar" }
+        context.dataStore.edit {
+            it[Keys.HAS_COMPLETED_ONBOARDING] = true
+            it[Keys.USER_NAME] = cleanName
+        }
+    }
     suspend fun updateProfile(name: String, email: String) {
         context.dataStore.edit {
-            it[Keys.USER_NAME] = name
-            it[Keys.USER_EMAIL] = email
+            it[Keys.USER_NAME] = name.trim().ifBlank { "Rockstar" }
+            it[Keys.GOOGLE_ACCOUNT_EMAIL] = email.trim()
         }
+    }
+    suspend fun setGoogleAccountEmail(email: String) {
+        context.dataStore.edit { it[Keys.GOOGLE_ACCOUNT_EMAIL] = email.trim() }
     }
     suspend fun setThemeMode(mode: AppThemeMode) {
         context.dataStore.edit { it[Keys.THEME_MODE] = mode.name }

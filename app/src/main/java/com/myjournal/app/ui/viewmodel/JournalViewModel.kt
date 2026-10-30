@@ -19,6 +19,7 @@ import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import java.io.File
 import java.time.LocalDate
+import java.time.LocalTime
 import java.util.Locale
 import javax.inject.Inject
 enum class AppThemeMode(val label: String) {
@@ -52,7 +53,7 @@ class JournalViewModel @Inject constructor(
     private val _audioProgressStep = MutableStateFlow(0)
     val audioProgressStep: StateFlow<Int> = _audioProgressStep.asStateFlow()
     private var audioJob: Job? = null
-    private val _syncStatus = MutableStateFlow("Backup / Restore on Drive >")
+    private val _syncStatus = MutableStateFlow("Connect Google Drive for cloud backup >")
     val syncStatus: StateFlow<String> = _syncStatus.asStateFlow()
     private var lastBackgroundTimestamp: Long = 0L
     val allActiveEntries: StateFlow<List<EntryEntity>> = repository.activeEntries
@@ -61,7 +62,16 @@ class JournalViewModel @Inject constructor(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
     val archivedEntries: StateFlow<List<EntryEntity>> = repository.archivedEntries
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
-    // True Consecutive Day Streak Calculation (Walks backward from Today or Yesterday)
+    val greetingText: StateFlow<String> = userSettings.map { settings ->
+        val name = settings.userName.trim().ifBlank { "Rockstar" }
+        val hour = LocalTime.now().hour
+        val timeGreeting = when (hour) {
+            in 0..11 -> "Good morning"
+            in 12..16 -> "Good afternoon"
+            else -> "Good evening"
+        }
+        "$timeGreeting, $name."
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), "Hello, Rockstar.")
     val streakCount: StateFlow<Int> = allActiveEntries.map { list ->
         val activeDates = list.mapNotNull {
             runCatching { LocalDate.parse(it.entryDate) }.getOrNull()
@@ -100,7 +110,6 @@ class JournalViewModel @Inject constructor(
             val folder = entry.folderId?.let { folderMap[it] }
             val folderName = folder?.name.orEmpty()
             val isPrivateFolder = folder?.isPrivate == true || entry.folderId == "folder_private"
-            // Hide "Hidden Vault" entries from the general "All" feed when Privacy Shield is active
             if (shieldActive && isPrivateFolder && filter == "All") {
                 return@filter false
             }
@@ -126,42 +135,34 @@ class JournalViewModel @Inject constructor(
     init {
         viewModelScope.launch {
             repository.seedInitialDataIfNeeded()
-            val account = driveSyncHelper.getSignedInAccount()
-            if (account != null) {
-                _syncStatus.value = "Connected (${account.email})"
+            prefs.settingsFlow.collect { s ->
+                if (s.googleAccountEmail.isNotBlank() && _syncStatus.value.startsWith("Connect")) {
+                    _syncStatus.value = "Connected (${s.googleAccountEmail}) >"
+                }
+            }
+        }
+    }
+    fun completeOnboarding(name: String) {
+        viewModelScope.launch {
+            prefs.setOnboardingCompleted(name.trim().ifBlank { "Rockstar" })
+        }
+    }
+    fun connectGoogleEmail(email: String) {
+        viewModelScope.launch {
+            val clean = email.trim()
+            if (clean.isNotBlank()) {
+                prefs.setGoogleAccountEmail(clean)
+                _syncStatus.value = "Connected ($clean) >"
             }
         }
     }
     fun isSignedInToDrive(): Boolean = driveSyncHelper.getSignedInAccount() != null
     fun getDriveSignInIntent(): Intent = driveSyncHelper.getSignInIntent()
     fun updateSyncStatusLabel(label: String) { _syncStatus.value = label }
-    fun backupToGoogleDriveNow(onResult: (String) -> Unit = {}) {
+    fun signOutFromCloud() {
         viewModelScope.launch {
-            _syncStatus.value = "Uploading backup to Google Drive..."
-            val jsonPayload = repository.exportBackupJson()
-            val res = driveSyncHelper.uploadBackupJsonToDrive(jsonPayload)
-            res.onSuccess { email ->
-                val time = repository.currentTimeLabel()
-                _syncStatus.value = "Synced to Drive ($time)"
-                onResult("Backed up to Google Drive ($email)!")
-            }.onFailure { err ->
-                _syncStatus.value = "Use Direct Drive Save \u00B7 Tap >"
-                onResult("OAuth note: ${err.message}")
-            }
-        }
-    }
-    fun restoreFromGoogleDriveNow(onResult: (String) -> Unit = {}) {
-        viewModelScope.launch {
-            _syncStatus.value = "Downloading from Google Drive..."
-            val res = driveSyncHelper.downloadBackupJsonFromDrive()
-            res.onSuccess { jsonPayload ->
-                val count = repository.importBackupJson(jsonPayload)
-                _syncStatus.value = "Restored $count entries from Drive"
-                onResult("Restored $count reflections from Google Drive!")
-            }.onFailure { err ->
-                _syncStatus.value = "Restore failed \u00B7 Tap >"
-                onResult("Drive restore failed: ${err.message}")
-            }
+            prefs.setGoogleAccountEmail("")
+            _syncStatus.value = "Connect Google Drive for cloud backup >"
         }
     }
     fun onAppBackgrounded() {
@@ -210,7 +211,7 @@ class JournalViewModel @Inject constructor(
         viewModelScope.launch { prefs.setThemeMode(next) }
     }
     fun saveProfile(name: String, email: String) {
-        viewModelScope.launch { prefs.updateProfile(name, email) }
+        viewModelScope.launch { prefs.updateProfile(name.trim(), email.trim()) }
     }
     fun setAutoLockTimeout(timeout: String) {
         viewModelScope.launch { prefs.setAutoLockTimeout(timeout) }
