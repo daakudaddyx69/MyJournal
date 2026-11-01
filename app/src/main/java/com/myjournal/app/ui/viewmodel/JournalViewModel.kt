@@ -11,6 +11,7 @@ import com.myjournal.app.data.preferences.UserPreferencesRepository
 import com.myjournal.app.data.preferences.UserSettings
 import com.myjournal.app.data.repository.JournalRepository
 import com.myjournal.app.data.sync.GoogleDriveSyncHelper
+import com.myjournal.app.ui.editor.RichTextHelper
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Job
@@ -20,6 +21,7 @@ import kotlinx.coroutines.launch
 import java.io.File
 import java.time.LocalDate
 import java.time.LocalTime
+import java.time.temporal.ChronoUnit
 import java.util.Locale
 import javax.inject.Inject
 enum class AppThemeMode(val label: String) {
@@ -56,6 +58,7 @@ class JournalViewModel @Inject constructor(
     private val _syncStatus = MutableStateFlow("Connect Google Drive for cloud backup >")
     val syncStatus: StateFlow<String> = _syncStatus.asStateFlow()
     private var lastBackgroundTimestamp: Long = 0L
+    private var suppressAutoLockUntil: Long = 0L
     val allActiveEntries: StateFlow<List<EntryEntity>> = repository.activeEntries
         .map { list -> list.filter { it.folderId != "folder_private" } }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -102,6 +105,34 @@ class JournalViewModel @Inject constructor(
         val totalMb = (mediaBytes + dbBytes) / (1024.0 * 1024.0)
         String.format(Locale.US, "%.2f MB (Photos & Audio)", totalMb)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), "0.10 MB")
+    // On This Day Resurfacing Memories (strictly excludes Hidden Vault & today's own entries)
+    val onThisDayMemories: StateFlow<List<Pair<String, EntryEntity>>> = combine(
+        repository.activeEntries,
+        folders
+    ) { list, folderList ->
+        val privateIds = folderList.filter { it.isPrivate }.map { it.id }.toSet() + "folder_private"
+        val today = LocalDate.now()
+        list.filter { it.folderId !in privateIds }
+            .mapNotNull { entry ->
+                val date = runCatching { LocalDate.parse(entry.entryDate) }.getOrNull() ?: return@mapNotNull null
+                if (!date.isBefore(today)) return@mapNotNull null
+                val daysBetween = ChronoUnit.DAYS.between(date, today)
+                val monthsBetween = ChronoUnit.MONTHS.between(date, today)
+                val yearsBetween = ChronoUnit.YEARS.between(date, today)
+                val label = when {
+                    date.month == today.month && date.dayOfMonth == today.dayOfMonth && yearsBetween >= 1 ->
+                        if (yearsBetween == 1L) "1 Year Ago Today" else "$yearsBetween Years Ago Today"
+                    date.dayOfMonth == today.dayOfMonth && monthsBetween >= 1 ->
+                        if (monthsBetween == 1L) "1 Month Ago Today" else "$monthsBetween Months Ago Today"
+                    daysBetween == 7L -> "1 Week Ago"
+                    daysBetween == 14L -> "2 Weeks Ago"
+                    daysBetween == 30L -> "30 Days Ago"
+                    else -> null
+                }
+                if (label != null) label to entry else null
+            }
+            .sortedByDescending { it.second.entryDate }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
     val entries: StateFlow<List<EntryEntity>> = combine(
         _searchQuery,
         _selectedFilter,
@@ -110,15 +141,19 @@ class JournalViewModel @Inject constructor(
     ) { query, filter, list, folderList ->
         val folderMap = folderList.associateBy { it.id }
         val isViewingVault = filter.equals("Hidden Vault", ignoreCase = true)
+        val cleanQuery = query.trim()
         list.filter { entry ->
             val folder = entry.folderId?.let { folderMap[it] }
             val folderName = folder?.name.orEmpty()
             val isInHiddenVault = entry.folderId == "folder_private" || folder?.isPrivate == true
-            val matchesQuery = query.isBlank() ||
-                entry.title.contains(query, ignoreCase = true) ||
-                entry.previewText.contains(query, ignoreCase = true) ||
-                entry.tagsCsv.contains(query, ignoreCase = true) ||
-                folderName.contains(query, ignoreCase = true)
+            val plainTitle = RichTextHelper.fromHtml(entry.title).text
+            val plainPreview = RichTextHelper.fromHtml(entry.previewText).text
+            val matchesQuery = cleanQuery.isBlank() ||
+                plainTitle.contains(cleanQuery, ignoreCase = true) ||
+                plainPreview.contains(cleanQuery, ignoreCase = true) ||
+                entry.previewText.contains(cleanQuery, ignoreCase = true) ||
+                entry.tagsCsv.contains(cleanQuery, ignoreCase = true) ||
+                folderName.contains(cleanQuery, ignoreCase = true)
             if (isViewingVault) {
                 isInHiddenVault && matchesQuery
             } else {
@@ -153,6 +188,9 @@ class JournalViewModel @Inject constructor(
             }
         }
     }
+    fun suppressAutoLockTemporarily(durationMillis: Long = 25_000L) {
+        suppressAutoLockUntil = SystemClock.elapsedRealtime() + durationMillis
+    }
     fun completeOnboarding(name: String) {
         viewModelScope.launch {
             prefs.setOnboardingCompleted(name.trim().ifBlank { "Rockstar" })
@@ -177,7 +215,9 @@ class JournalViewModel @Inject constructor(
         }
     }
     fun onAppBackgrounded() {
-        lastBackgroundTimestamp = SystemClock.elapsedRealtime()
+        val now = SystemClock.elapsedRealtime()
+        if (now < suppressAutoLockUntil) return
+        lastBackgroundTimestamp = now
         if (_selectedFilter.value.equals("Hidden Vault", ignoreCase = true)) {
             _selectedFilter.value = "All"
         }
@@ -186,8 +226,13 @@ class JournalViewModel @Inject constructor(
         }
     }
     fun onAppForegrounded() {
+        val now = SystemClock.elapsedRealtime()
+        if (now < suppressAutoLockUntil) {
+            suppressAutoLockUntil = 0L
+            return
+        }
         if (lastBackgroundTimestamp == 0L) return
-        val elapsedMillis = SystemClock.elapsedRealtime() - lastBackgroundTimestamp
+        val elapsedMillis = now - lastBackgroundTimestamp
         val timeoutMillis = when (userSettings.value.autoLockTimeout) {
             "Immediate" -> 0L
             "After 1 minute" -> 60_000L

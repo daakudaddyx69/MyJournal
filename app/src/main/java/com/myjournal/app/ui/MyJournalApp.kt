@@ -72,7 +72,7 @@ fun MyJournalApp(viewModel: JournalViewModel = hiltViewModel()) {
                                     OutlinedTextField(
                                         value = searchQuery,
                                         onValueChange = viewModel::updateSearchQuery,
-                                        placeholder = { Text("Search reflections, tags, folders...") },
+                                        placeholder = { Text("Search titles, body, checklists, tags...") },
                                         singleLine = true,
                                         modifier = Modifier.fillMaxWidth()
                                     )
@@ -109,6 +109,7 @@ fun MyJournalApp(viewModel: JournalViewModel = hiltViewModel()) {
                                 }
                                 IconButton(onClick = {
                                     if (isPrivacyShield) {
+                                        viewModel.suppressAutoLockTemporarily()
                                         BiometricHelper.authenticate(context) {
                                             viewModel.setPrivacyShield(false)
                                             Toast.makeText(context, "Privacy Shield Unlocked", Toast.LENGTH_SHORT).show()
@@ -246,11 +247,10 @@ fun MyJournalApp(viewModel: JournalViewModel = hiltViewModel()) {
                     }
                 }
             }
-            // Wait until DataStore finishes loading so the Welcome Dialog never flashes on startup!
             if (settings.isSettingsLoaded && !settings.hasCompletedOnboarding) {
                 AlertDialog(
                     onDismissRequest = {},
-                    title = { Text("Welcome to Your Sanctuary ✨") },
+                    title = { Text("Welcome to Your Sanctuary \u2728") },
                     text = {
                         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                             Text("A quiet, offline-first space for your thoughts and reflections. What should we call you?")

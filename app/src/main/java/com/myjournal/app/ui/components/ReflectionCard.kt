@@ -1,7 +1,13 @@
 package com.myjournal.app.ui.components
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.rememberTransformableState
+import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -11,24 +17,56 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import coil.compose.AsyncImage
 import com.myjournal.app.data.local.EntryEntity
 import com.myjournal.app.ui.editor.RichTextHelper
 import com.myjournal.app.util.DateUtils
 import java.io.File
+private fun highlightQueryInText(
+    base: AnnotatedString,
+    query: String,
+    highlightBg: Color
+): AnnotatedString {
+    val clean = query.trim()
+    if (clean.isEmpty()) return base
+    return buildAnnotatedString {
+        append(base)
+        val raw = base.text
+        var startIndex = 0
+        while (startIndex < raw.length) {
+            val found = raw.indexOf(clean, startIndex, ignoreCase = true)
+            if (found == -1) break
+            addStyle(
+                SpanStyle(background = highlightBg, fontWeight = FontWeight.Bold),
+                found,
+                found + clean.length
+            )
+            startIndex = found + clean.length
+        }
+    }
+}
 @Composable
 fun ReflectionCard(
     entry: EntryEntity,
     isPrivacyMasked: Boolean,
     isPlayingAudio: Boolean,
     audioProgressStep: Int,
+    searchQuery: String = "",
     onCardClick: (EntryEntity) -> Unit,
     onPlayAudioClick: (EntryEntity) -> Unit,
     onTogglePin: (EntryEntity) -> Unit,
@@ -39,6 +77,7 @@ fun ReflectionCard(
     modifier: Modifier = Modifier
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
+    var showLightbox by remember { mutableStateOf(false) }
     val tags = remember(entry.tagsCsv) {
         entry.tagsCsv.split(",").map { it.trim() }.filter { it.isNotBlank() }
     }
@@ -48,13 +87,29 @@ fun ReflectionCard(
         listOf(Color(0xFF3A4D2C), Color(0xFF8C7A4B))
     }
     val isInVault = entry.folderId == "folder_private"
-    // Only mask when BOTH the individual card is marked locked AND the top master Privacy Shield is locked!
     val hideContent = entry.isLocked && isPrivacyMasked
     val formattedDateHeader = remember(entry.entryDate, entry.timeLabel) {
         DateUtils.formatCardHeader(entry.entryDate, entry.timeLabel)
     }
-    val styledTitle = remember(entry.title) {
-        RichTextHelper.fromHtml(entry.title)
+    val highlightColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.40f)
+    val styledTitle = remember(entry.title, searchQuery, highlightColor) {
+        val parsed = RichTextHelper.fromHtml(entry.title)
+        highlightQueryInText(parsed, searchQuery, highlightColor)
+    }
+    val styledPreview = remember(entry.previewText, searchQuery, highlightColor) {
+        val cleanQ = searchQuery.trim()
+        val rawText = entry.previewText
+        val snippetText = if (cleanQ.isNotEmpty() && rawText.contains(cleanQ, ignoreCase = true)) {
+            val matchLine = rawText.lineSequence().firstOrNull { it.contains(cleanQ, ignoreCase = true) }
+            if (matchLine != null && rawText.lineSequence().firstOrNull() != matchLine) {
+                "$matchLine\n$rawText"
+            } else {
+                rawText
+            }
+        } else {
+            rawText
+        }
+        highlightQueryInText(AnnotatedString(snippetText), searchQuery, highlightColor)
     }
     Card(
         modifier = modifier
@@ -191,7 +246,7 @@ fun ReflectionCard(
                 )
                 Spacer(modifier = Modifier.height(12.dp))
                 Row(modifier = Modifier.fillMaxWidth()) {
-                    val hasPhotoFile = !entry.mediaUri.isNullOrBlank() && entry.mediaUri.endsWith(".jpg")
+                    val hasPhotoFile = !entry.mediaUri.isNullOrBlank() && entry.mediaUri.endsWith(".jpg") && File(entry.mediaUri).exists()
                     if (hasPhotoFile) {
                         AsyncImage(
                             model = File(entry.mediaUri!!),
@@ -200,6 +255,7 @@ fun ReflectionCard(
                             modifier = Modifier
                                 .size(96.dp)
                                 .clip(RoundedCornerShape(16.dp))
+                                .clickable { showLightbox = true }
                         )
                     } else {
                         Box(
@@ -242,7 +298,7 @@ fun ReflectionCard(
                         if (entry.previewText.isNotBlank()) {
                             Spacer(modifier = Modifier.height(8.dp))
                             Text(
-                                text = entry.previewText,
+                                text = styledPreview,
                                 fontSize = 13.sp,
                                 lineHeight = 18.sp,
                                 color = MaterialTheme.colorScheme.onSurface,
@@ -261,6 +317,124 @@ fun ReflectionCard(
                         }
                     }
                 }
+            }
+        }
+    }
+    if (showLightbox && !entry.mediaUri.isNullOrBlank()) {
+        FullScreenPhotoLightbox(
+            photoPaths = listOf(entry.mediaUri),
+            initialIndex = 0,
+            onDismiss = { showLightbox = false }
+        )
+    }
+}
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun FullScreenPhotoLightbox(
+    photoPaths: List<String>,
+    initialIndex: Int = 0,
+    onDismiss: () -> Unit
+) {
+    if (photoPaths.isEmpty()) return
+    val pagerState = rememberPagerState(
+        initialPage = initialIndex.coerceIn(0, photoPaths.lastIndex),
+        pageCount = { photoPaths.size }
+    )
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.95f))
+        ) {
+            HorizontalPager(
+                state = pagerState,
+                modifier = Modifier.fillMaxSize()
+            ) { page ->
+                var scale by remember(page) { mutableFloatStateOf(1f) }
+                var offset by remember(page) { mutableStateOf(Offset.Zero) }
+                val transformState = rememberTransformableState { zoomChange, panChange, _ ->
+                    val newScale = (scale * zoomChange).coerceIn(1f, 4f)
+                    scale = newScale
+                    offset = if (newScale > 1f) {
+                        Offset(
+                            x = (offset.x + panChange.x).coerceIn(-600f * (newScale - 1f), 600f * (newScale - 1f)),
+                            y = (offset.y + panChange.y).coerceIn(-900f * (newScale - 1f), 900f * (newScale - 1f))
+                        )
+                    } else {
+                        Offset.Zero
+                    }
+                }
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .pointerInput(page) {
+                            detectTapGestures(
+                                onDoubleTap = {
+                                    if (scale > 1.05f) {
+                                        scale = 1f
+                                        offset = Offset.Zero
+                                    } else {
+                                        scale = 2.4f
+                                    }
+                                },
+                                onTap = {
+                                    if (scale <= 1.05f) onDismiss()
+                                }
+                            )
+                        },
+                    contentAlignment = Alignment.Center
+                ) {
+                    AsyncImage(
+                        model = File(photoPaths[page]),
+                        contentDescription = "Full Screen Photo",
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .graphicsLayer(
+                                scaleX = scale,
+                                scaleY = scale,
+                                translationX = offset.x,
+                                translationY = offset.y
+                            )
+                            .transformable(state = transformState)
+                    )
+                }
+            }
+            if (photoPaths.size > 1) {
+                Surface(
+                    shape = CircleShape,
+                    color = Color.Black.copy(alpha = 0.6f),
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 32.dp)
+                ) {
+                    Text(
+                        text = "${pagerState.currentPage + 1} / ${photoPaths.size}",
+                        color = Color.White,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp)
+                    )
+                }
+            }
+            IconButton(
+                onClick = onDismiss,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .statusBarsPadding()
+                    .padding(16.dp)
+                    .size(40.dp)
+                    .clip(CircleShape)
+                    .background(Color.White.copy(alpha = 0.18f))
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Close,
+                    contentDescription = "Close Lightbox",
+                    tint = Color.White
+                )
             }
         }
     }

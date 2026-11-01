@@ -33,11 +33,13 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.myjournal.app.data.local.EntryEntity
 import com.myjournal.app.ui.components.ReflectionCard
+import com.myjournal.app.ui.editor.RichTextHelper
 import com.myjournal.app.ui.viewmodel.JournalViewModel
 import com.myjournal.app.util.BackupZipHelper
 import com.myjournal.app.util.BiometricHelper
@@ -64,13 +66,16 @@ fun FeedScreen(
     val entries by viewModel.entries.collectAsState()
     val folders by viewModel.folders.collectAsState()
     val selectedFilter by viewModel.selectedFilter.collectAsState()
+    val searchQuery by viewModel.searchQuery.collectAsState()
     val isPrivacyShield by viewModel.isPrivacyShieldActive.collectAsState()
     val playingEntryId by viewModel.playingEntryId.collectAsState()
     val audioProgressStep by viewModel.audioProgressStep.collectAsState()
     val greeting by viewModel.greetingText.collectAsState()
+    val onThisDayMemories by viewModel.onThisDayMemories.collectAsState()
     var showCreateFolderDialog by remember { mutableStateOf(false) }
     var newFolderName by remember { mutableStateOf("") }
     var chipRevealingTrash by remember { mutableStateOf<String?>(null) }
+    var isOnThisDayDismissed by remember { mutableStateOf(false) }
     val feedMicPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { isGranted ->
@@ -145,6 +150,7 @@ fun FeedScreen(
                                 if (granted) {
                                     onOpenEditor(null, "VOICE", todayIso)
                                 } else {
+                                    viewModel.suppressAutoLockTemporarily()
                                     feedMicPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
                                 }
                             },
@@ -155,7 +161,10 @@ fun FeedScreen(
                             label = "Photo",
                             containerColor = MaterialTheme.colorScheme.surfaceVariant,
                             contentColor = MaterialTheme.colorScheme.onSurface,
-                            onClick = { onOpenEditor(null, "PHOTO", todayIso) },
+                            onClick = {
+                                viewModel.suppressAutoLockTemporarily()
+                                onOpenEditor(null, "PHOTO", todayIso)
+                            },
                             modifier = Modifier.weight(1f)
                         )
                     }
@@ -188,6 +197,7 @@ fun FeedScreen(
                                 onClick = {
                                     chipRevealingTrash = null
                                     if (isVault) {
+                                        viewModel.suppressAutoLockTemporarily()
                                         BiometricHelper.authenticate(
                                             context = context,
                                             title = "Unlock Hidden Vault"
@@ -245,6 +255,100 @@ fun FeedScreen(
                 }
             }
         }
+        // "On This Day" Resurfacing Card
+        if (selectedFilter == "All" && searchQuery.isBlank() && onThisDayMemories.isNotEmpty() && !isOnThisDayDismissed) {
+            item {
+                val (milestoneLabel, memoryEntry) = onThisDayMemories.first()
+                val maskMemory = memoryEntry.isLocked && isPrivacyShield
+                val cleanTitle = remember(memoryEntry.title) { RichTextHelper.fromHtml(memoryEntry.title).text }
+                Card(
+                    shape = RoundedCornerShape(22.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(22.dp))
+                        .clickable {
+                            if (maskMemory) {
+                                viewModel.suppressAutoLockTemporarily()
+                                BiometricHelper.authenticate(
+                                    context = context,
+                                    title = "Unlock Memory"
+                                ) {
+                                    viewModel.setPrivacyShield(false)
+                                    onOpenEditor(memoryEntry.id, "WRITE", memoryEntry.entryDate)
+                                }
+                            } else {
+                                onOpenEditor(memoryEntry.id, "WRITE", memoryEntry.entryDate)
+                            }
+                        }
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    imageVector = Icons.Default.AutoAwesome,
+                                    contentDescription = "On This Day",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "On This Day \u00B7 $milestoneLabel",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                            IconButton(
+                                onClick = { isOnThisDayDismissed = true },
+                                modifier = Modifier.size(22.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Close,
+                                    contentDescription = "Dismiss Memory",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(6.dp))
+                        if (maskMemory) {
+                            Text(
+                                text = "\uD83D\uDD12 Locked Memory — Tap to unlock",
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        } else {
+                            Text(
+                                text = cleanTitle,
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            if (memoryEntry.previewText.isNotBlank()) {
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = memoryEntry.previewText,
+                                    fontSize = 13.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
         item {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -252,7 +356,7 @@ fun FeedScreen(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = if (selectedFilter == "All") "Your Reflections" else "$selectedFilter (${entries.size})",
+                    text = if (selectedFilter == "All" && searchQuery.isBlank()) "Your Reflections" else "$selectedFilter (${entries.size})",
                     fontSize = 16.sp,
                     fontWeight = FontWeight.SemiBold,
                     color = MaterialTheme.colorScheme.secondary
@@ -277,7 +381,10 @@ fun FeedScreen(
                             .padding(24.dp),
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        Text("No reflections in \"$selectedFilter\" yet.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(
+                            text = if (searchQuery.isNotBlank()) "No reflections matching \"$searchQuery\"." else "No reflections in \"$selectedFilter\" yet.",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
                 }
             }
@@ -288,8 +395,10 @@ fun FeedScreen(
                     isPrivacyMasked = isPrivacyShield,
                     isPlayingAudio = playingEntryId == entry.id,
                     audioProgressStep = audioProgressStep,
+                    searchQuery = searchQuery,
                     onCardClick = { clicked: EntryEntity ->
                         if (clicked.isLocked && isPrivacyShield) {
+                            viewModel.suppressAutoLockTemporarily()
                             BiometricHelper.authenticate(
                                 context = context,
                                 title = "Unlock Reflection"
@@ -320,23 +429,24 @@ fun FeedScreen(
                     },
                     onTogglePin = viewModel::togglePin,
                     onToggleLock = { targetEntry ->
-                            if (!targetEntry.isLocked) {
-                                viewModel.toggleLock(targetEntry)
-                                viewModel.setPrivacyShield(true)
-                                Toast.makeText(context, "Card Locked \uD83D\uDD12", Toast.LENGTH_SHORT).show()
-                            } else if (isPrivacyShield) {
-                                BiometricHelper.authenticate(
-                                    context = context,
-                                    title = "Remove Card Lock"
-                                ) {
-                                    viewModel.toggleLock(targetEntry)
-                                    Toast.makeText(context, "Card Lock Removed \uD83D\uDD13", Toast.LENGTH_SHORT).show()
-                                }
-                            } else {
+                        if (!targetEntry.isLocked) {
+                            viewModel.toggleLock(targetEntry)
+                            viewModel.setPrivacyShield(true)
+                            Toast.makeText(context, "Card Locked \uD83D\uDD12", Toast.LENGTH_SHORT).show()
+                        } else if (isPrivacyShield) {
+                            viewModel.suppressAutoLockTemporarily()
+                            BiometricHelper.authenticate(
+                                context = context,
+                                title = "Remove Card Lock"
+                            ) {
                                 viewModel.toggleLock(targetEntry)
                                 Toast.makeText(context, "Card Lock Removed \uD83D\uDD13", Toast.LENGTH_SHORT).show()
                             }
-                        },
+                        } else {
+                            viewModel.toggleLock(targetEntry)
+                            Toast.makeText(context, "Card Lock Removed \uD83D\uDD13", Toast.LENGTH_SHORT).show()
+                        }
+                    },
                     onMoveToVault = {
                         val movingToVault = it.folderId != "folder_private"
                         viewModel.toggleMoveToVault(it)
@@ -598,6 +708,7 @@ fun CalendarScreen(
                         audioProgressStep = audioProgressStep,
                         onCardClick = { clicked: EntryEntity ->
                             if (clicked.isLocked && isPrivacyShield) {
+                                viewModel.suppressAutoLockTemporarily()
                                 BiometricHelper.authenticate(context) {
                                     viewModel.setPrivacyShield(false)
                                     onOpenEditor(clicked.id, "WRITE", clicked.entryDate)
@@ -630,6 +741,7 @@ fun CalendarScreen(
                                 viewModel.setPrivacyShield(true)
                                 Toast.makeText(context, "Card Locked \uD83D\uDD12", Toast.LENGTH_SHORT).show()
                             } else if (isPrivacyShield) {
+                                viewModel.suppressAutoLockTemporarily()
                                 BiometricHelper.authenticate(
                                     context = context,
                                     title = "Remove Card Lock"
@@ -961,6 +1073,7 @@ fun ProfileScreen(
         }
     }
     fun launchSystemGoogleAccountPicker() {
+        viewModel.suppressAutoLockTemporarily()
         val intent = AccountManager.newChooseAccountIntent(
             null,
             null,
@@ -1106,6 +1219,7 @@ fun ProfileScreen(
                             checked = settings.isPrivacyShieldActive,
                             onCheckedChange = { wantActive ->
                                 if (!wantActive) {
+                                    viewModel.suppressAutoLockTemporarily()
                                     BiometricHelper.authenticate(context) {
                                         viewModel.setPrivacyShield(false)
                                     }
@@ -1120,6 +1234,7 @@ fun ProfileScreen(
                         title = "Hidden Vault",
                         value = "$vaultCount Hidden >",
                         onClick = {
+                            viewModel.suppressAutoLockTemporarily()
                             BiometricHelper.authenticate(
                                 context = context,
                                 title = "Access Hidden Vault"
@@ -1203,6 +1318,7 @@ fun ProfileScreen(
                                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
                                         ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
                                     ) {
+                                        viewModel.suppressAutoLockTemporarily()
                                         notifPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
                                     } else {
                                         viewModel.setDailyReminder(true)
@@ -1271,6 +1387,7 @@ fun ProfileScreen(
                     Button(
                         onClick = {
                             showDriveSyncDialog = false
+                            viewModel.suppressAutoLockTemporarily()
                             exportZipLauncher.launch("my_journal_cloud_${DateUtils.todayIso()}.zip")
                         },
                         modifier = Modifier.fillMaxWidth()
@@ -1280,6 +1397,7 @@ fun ProfileScreen(
                     OutlinedButton(
                         onClick = {
                             showDriveSyncDialog = false
+                            viewModel.suppressAutoLockTemporarily()
                             importZipLauncher.launch(arrayOf("application/zip", "application/json", "*/*"))
                         },
                         modifier = Modifier.fillMaxWidth()
@@ -1303,6 +1421,7 @@ fun ProfileScreen(
             confirmButton = {
                 Button(onClick = {
                     showBackupDialog = false
+                    viewModel.suppressAutoLockTemporarily()
                     exportZipLauncher.launch("my_journal_backup_${DateUtils.todayIso()}.zip")
                 }) {
                     Text("Export .ZIP")
@@ -1311,6 +1430,7 @@ fun ProfileScreen(
             dismissButton = {
                 OutlinedButton(onClick = {
                     showBackupDialog = false
+                    viewModel.suppressAutoLockTemporarily()
                     importZipLauncher.launch(arrayOf("application/zip", "application/json", "*/*"))
                 }) {
                     Text("Restore .ZIP")
@@ -1377,7 +1497,11 @@ fun ProfileScreen(
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Text(item.title, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
+                                Text(
+                                    text = RichTextHelper.fromHtml(item.title).text,
+                                    fontWeight = FontWeight.Medium,
+                                    modifier = Modifier.weight(1f)
+                                )
                                 TextButton(onClick = { viewModel.unarchive(item.id) }) {
                                     Text("Unarchive")
                                 }
@@ -1406,7 +1530,11 @@ fun ProfileScreen(
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Text(item.title, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
+                                Text(
+                                    text = RichTextHelper.fromHtml(item.title).text,
+                                    fontWeight = FontWeight.Medium,
+                                    modifier = Modifier.weight(1f)
+                                )
                                 TextButton(onClick = { viewModel.restoreFromTrash(item.id) }) {
                                     Text("Restore")
                                 }
